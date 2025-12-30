@@ -1,0 +1,157 @@
+<!-- ========================================================================== -->
+<!-- MODAL - REVISIÓN DE LIQUIDACIÓN                                           -->
+<!-- Diseño optimizado y minimalista                                          -->
+<!-- ========================================================================== -->
+
+<!-- Overlay -->
+<div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" (click)="cerrarModal()">
+
+    <!-- Modal -->
+    <div class="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[90vh] overflow-hidden"
+        (click)="$event.stopPropagation()">
+
+        <!-- Header -->
+        <div class="flex items-center justify-between p-5 border-b border-gray-200 sticky top-0 bg-white z-10">
+            <div>
+                <h2 class="text-lg font-bold text-gray-900">Detalle de Liquidación</h2>
+                <p class="text-xs text-gray-500 mt-0.5">
+                    ID: {{ liquidacion?.idLiquidaciones }}
+                </p>
+            </div>
+            <button (click)="cerrarModal()" class="text-gray-400 hover:text-gray-600 transition">
+                <lucide-icon [img]="X" class="w-5 h-5"></lucide-icon>
+            </button>
+        </div>
+
+        <!-- Body -->
+        <div class="p-5 space-y-4 overflow-y-auto max-h-[calc(90vh-140px)]" *ngIf="liquidacion">
+
+            <!-- Estado -->
+            <div class="flex items-center justify-between p-4 rounded-lg border"
+                [class.bg-blue-50]="liquidacion.estado === 'enviada'"
+                [class.border-blue-200]="liquidacion.estado === 'enviada'"
+                [class.bg-purple-50]="liquidacion.estado === 'corregida'"
+                [class.border-purple-200]="liquidacion.estado === 'corregida'">
+
+                <div>
+                    <p class="text-xs font-medium" [class.text-blue-900]="liquidacion.estado === 'enviada'"
+                        [class.text-purple-900]="liquidacion.estado === 'corregida'">
+                        Estado de la Liquidación
+                    </p>
+                </div>
+                <span class="inline-flex items-center px-3 py-1 rounded text-sm font-medium"
+                    [class]="getClaseEstado(liquidacion.estado)">
+                    {{ getTextoEstado(liquidacion.estado) }}
+                </span>
+            </div>
+
+            <!-- Información del Usuario -->
+            <div class="bg-blue-50 rounded-lg border border-blue-200 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <lucide-icon [img]="User" class="w-4 h-4 text-blue-600"></lucide-icon>
+                    <h3 class="text-sm font-semibold text-blue-900">Información del Usuario</h3>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                        <p class="text-xs text-blue-600 mb-0.5">Nombre</p>
+                        <p class="font-medium text-blue-900">{{ getNombreCompleto(liquidacion) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-blue-600 mb-0.5">Puesto</p>
+                        <p class="font-medium text-blue-900">{{ liquidacion.puesto_usuario }}</p>
+                    </div>
+                    <div class="col-span-2">
+                        <p class="text-xs text-blue-600 mb-0.5">Agencia</p>
+                        <p class="font-medium text-blue-900">{{ liquidacion.agencia_usuario }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Información de la Factura -->
+            <div class="bg-green-50 rounded-lg border border-green-200 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <lucide-icon [img]="FileText" class="w-4 h-4 text-green-600"></lucide-icon>
+                    <h3 class="text-sm font-semibold text-green-900">Información de la Factura</h3>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                        <p class="text-xs text-green-600 mb-0.5">Número de Factura</p>
+                        <p class="font-semibold text-green-900">{{ liquidacion.numero_factura }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-green-600 mb-0.5">Monto Total</p>
+                        <p class="font-semibold text-green-900">{{ formatMoneda(liquidacion.monto) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-green-600 mb-0.5">Fecha de Emisión</p>
+                        <p class="font-medium text-green-900">{{ formatFechaCorta(liquidacion.fecha_emision) }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-green-600 mb-0.5">Tipo de Apoyo</p>
+                        <p class="font-medium text-green-900">{{ liquidacion.tipo_apoyo }}</p>
+                    </div>
+                    <div class="col-span-2">
+                        <p class="text-xs text-green-600 mb-0.5">Emisor</p>
+                        <p class="font-medium text-green-900">{{ liquidacion.nombre_emisor }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Vehículo (si existe) -->
+            <div *ngIf="liquidacion.vehiculo_placa" class="bg-gray-50 rounded-lg border border-gray-200 p-4">
+                <div class="flex items-center gap-2 mb-3">
+                    <lucide-icon [img]="Car" class="w-4 h-4 text-gray-600"></lucide-icon>
+                    <h3 class="text-sm font-semibold text-gray-900">Vehículo</h3>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                        <p class="text-xs text-gray-600 mb-0.5">Placa</p>
+                        <p class="font-medium text-gray-900">{{ liquidacion.vehiculo_placa }}</p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-gray-600 mb-0.5">Marca</p>
+                        <p class="font-medium text-gray-900">{{ liquidacion.vehiculo_marca }}</p>
+                    </div>
+                    <div class="col-span-2">
+                        <p class="text-xs text-gray-600 mb-0.5">Tipo</p>
+                        <p class="font-medium text-gray-900">{{ liquidacion.tipo_vehiculo }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Descripción -->
+            <div class="bg-gray-50 rounded-lg border border-gray-200 p-4">
+                <h3 class="text-sm font-semibold text-gray-900 mb-2">Descripción</h3>
+                <p class="text-sm text-gray-700 whitespace-pre-wrap">{{ liquidacion.descripcion }}</p>
+            </div>
+
+            <!-- Fechas -->
+            <div class="grid grid-cols-2 gap-3 text-sm">
+                <div class="bg-gray-50 rounded-lg border border-gray-200 p-3">
+                    <div class="flex items-center gap-2 mb-1">
+                        <lucide-icon [img]="Calendar" class="w-3.5 h-3.5 text-gray-500"></lucide-icon>
+                        <p class="text-xs text-gray-600">Fecha de Liquidación</p>
+                    </div>
+                    <p class="font-medium text-gray-900 text-xs">{{ formatFecha(liquidacion.fecha_liquidacion) }}</p>
+                </div>
+                <div class="bg-gray-50 rounded-lg border border-gray-200 p-3">
+                    <div class="flex items-center gap-2 mb-1">
+                        <lucide-icon [img]="Calendar" class="w-3.5 h-3.5 text-gray-500"></lucide-icon>
+                        <p class="text-xs text-gray-600">Fecha de Creación</p>
+                    </div>
+                    <p class="font-medium text-gray-900 text-xs">{{ formatFecha(liquidacion.created_at) }}</p>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- Footer -->
+        <div class="flex items-center justify-end gap-2 p-5 border-t border-gray-200 bg-gray-50 sticky bottom-0">
+            <button type="button" (click)="cerrarModal()"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition">
+                Cerrar
+            </button>
+        </div>
+
+    </div>
+</div>

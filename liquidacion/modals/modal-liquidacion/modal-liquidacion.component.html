@@ -1,0 +1,281 @@
+<!-- ========================================================================== -->
+<!-- MODAL - LIQUIDACIÓN                                                       -->
+<!-- Diseño optimizado y minimalista                                          -->
+<!-- ========================================================================== -->
+
+<!-- Overlay -->
+<div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" (click)="cerrarModal()">
+
+    <!-- Modal -->
+    <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full"
+        (click)="$event.stopPropagation()">
+
+        <!-- Header -->
+        <div class="flex items-center justify-between p-5 border-b border-gray-200 sticky top-0 bg-white z-10">
+            <h2 class="text-lg font-bold text-gray-900">{{ tituloModal }}</h2>
+            <button (click)="cerrarModal()" [disabled]="guardando()"
+                class="text-gray-400 hover:text-gray-600 transition disabled:opacity-50">
+                <lucide-icon [img]="X" class="w-5 h-5"></lucide-icon>
+            </button>
+        </div>
+
+        <!-- Body -->
+        <div class="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+
+            <!-- Error global -->
+            <div *ngIf="error()" class="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm">
+                <lucide-icon [img]="AlertCircle" class="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0"></lucide-icon>
+                <span class="text-red-800">{{ error() }}</span>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- BÚSQUEDA DE FACTURA (Solo crear)                             -->
+            <!-- ============================================================ -->
+            <div *ngIf="modo === 'crear'">
+                <label class="block text-sm font-medium text-gray-700 mb-1">
+                    Número de Factura <span class="text-red-500">*</span>
+                </label>
+                <form [formGroup]="formBusqueda" (ngSubmit)="buscarFactura()" class="flex gap-2">
+                    <input type="text" formControlName="numero_factura" placeholder="Ingrese el número de factura"
+                        class="flex-1 px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        [class.border-red-500]="esInvalido(formBusqueda, 'numero_factura')"
+                        [class.border-gray-300]="!esInvalido(formBusqueda, 'numero_factura')">
+                    <button type="submit" [disabled]="buscandoFactura()"
+                        class="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition disabled:opacity-50 flex items-center gap-2">
+                        <lucide-icon [img]="Search" [class.animate-spin]="buscandoFactura()"
+                            class="w-4 h-4"></lucide-icon>
+                        {{ buscandoFactura() ? 'Buscando...' : 'Buscar' }}
+                    </button>
+                </form>
+                <p *ngIf="esInvalido(formBusqueda, 'numero_factura')" class="mt-1 text-xs text-red-600">
+                    {{ obtenerError(formBusqueda, 'numero_factura') }}
+                </p>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- DATOS DE LA FACTURA (Card compacto)                          -->
+            <!-- ============================================================ -->
+            <div *ngIf="datosFactura() || (modo === 'editar' && liquidacion)"
+                class="bg-blue-50 rounded-lg border border-blue-200 p-3">
+
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                        <p class="text-xs text-blue-600 mb-0.5">Factura</p>
+                        <p class="font-semibold text-blue-900">
+                            {{ modo === 'crear' ? (datosFactura()?.factura?.numero_dte || '—') :
+                            (liquidacion?.numero_factura || '—') }}
+                        </p>
+                    </div>
+                    <div>
+                        <p class="text-xs text-blue-600 mb-0.5">Monto</p>
+                        <p class="font-semibold text-blue-900">
+                            {{ modo === 'crear' ? (datosFactura()?.factura?.monto_total ?
+                            formatMoneda(datosFactura()!.factura.monto_total) : '—') : (liquidacion?.monto ?
+                            formatMoneda(liquidacion!.monto) : '—') }}
+                        </p>
+                    </div>
+                    <div *ngIf="modo === 'crear'">
+                        <p class="text-xs text-blue-600 mb-0.5">Emisor</p>
+                        <p class="font-medium text-blue-900 text-xs truncate">
+                            {{ datosFactura()?.factura?.nombre_emisor || '—' }}
+                        </p>
+                    </div>
+                    <div *ngIf="modo === 'crear'">
+                        <p class="text-xs text-blue-600 mb-0.5">Fecha Emisión</p>
+                        <p class="font-medium text-blue-900 text-xs">
+                            {{ datosFactura()?.factura?.fecha_emision ?
+                            formatFecha(datosFactura()!.factura.fecha_emision) : '—' }}
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Estado de días hábiles (compacto) -->
+                <div *ngIf="modo === 'crear' && datosFactura()"
+                    class="flex items-center justify-between mt-3 pt-3 border-t border-blue-200">
+                    <div class="flex items-center gap-2">
+                        <lucide-icon [img]="Clock" class="w-4 h-4"
+                            [class.text-green-600]="!datosFactura()!.requiere_autorizacion"
+                            [class.text-red-600]="datosFactura()!.requiere_autorizacion"></lucide-icon>
+                        <div>
+                            <p class="text-xs font-medium"
+                                [class.text-green-900]="!datosFactura()!.requiere_autorizacion"
+                                [class.text-red-900]="datosFactura()!.requiere_autorizacion">
+                                {{ datosFactura()!.dias_habiles_transcurridos }}/{{
+                                datosFactura()!.dias_habiles_permitidos }} días hábiles
+                            </p>
+                        </div>
+                    </div>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        [class.bg-green-100]="!datosFactura()!.requiere_autorizacion"
+                        [class.text-green-700]="!datosFactura()!.requiere_autorizacion"
+                        [class.bg-red-100]="datosFactura()!.requiere_autorizacion"
+                        [class.text-red-700]="datosFactura()!.requiere_autorizacion">
+                        {{ datosFactura()!.requiere_autorizacion ? 'Fuera de Plazo' : 'En Tiempo' }}
+                    </span>
+                </div>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- ALERTA DE AUTORIZACIÓN                                       -->
+            <!-- ============================================================ -->
+            <div *ngIf="modo === 'crear' && datosFactura()?.requiere_autorizacion && !datosFactura()?.tiene_autorizacion_aprobada"
+                class="flex items-start gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm">
+                <lucide-icon [img]="AlertTriangle" class="w-4 h-4 text-yellow-600 mt-0.5 flex-shrink-0"></lucide-icon>
+                <p class="text-yellow-800 text-xs">
+                    Esta factura requiere autorización gerencial para ser liquidada.
+                </p>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- SOLICITUD DE AUTORIZACIÓN (compacto)                         -->
+            <!-- ============================================================ -->
+            <div *ngIf="modo === 'crear' && datosFactura()?.solicitud_autorizacion"
+                class="p-3 rounded-lg border text-sm"
+                [class.bg-yellow-50]="datosFactura()!.solicitud_autorizacion!.estado === 'pendiente'"
+                [class.border-yellow-200]="datosFactura()!.solicitud_autorizacion!.estado === 'pendiente'"
+                [class.bg-green-50]="datosFactura()!.solicitud_autorizacion!.estado === 'aprobada'"
+                [class.border-green-200]="datosFactura()!.solicitud_autorizacion!.estado === 'aprobada'"
+                [class.bg-red-50]="datosFactura()!.solicitud_autorizacion!.estado === 'rechazada'"
+                [class.border-red-200]="datosFactura()!.solicitud_autorizacion!.estado === 'rechazada'">
+
+                <div class="flex items-center justify-between mb-2">
+                    <p class="text-xs font-medium text-gray-700">Estado de Autorización</p>
+                    <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                        [class]="getClaseAutorizacion(datosFactura()!.solicitud_autorizacion!.estado)">
+                        {{ getTextoAutorizacion(datosFactura()!.solicitud_autorizacion!.estado) }}
+                    </span>
+                </div>
+
+                <p class="text-xs text-gray-600 mb-1">
+                    Solicitada: {{ formatFecha(datosFactura()!.solicitud_autorizacion!.fecha_solicitud) }}
+                </p>
+
+                <p *ngIf="datosFactura()!.solicitud_autorizacion!.nombre_autorizador" class="text-xs text-gray-600">
+                    Revisada por: {{ datosFactura()!.solicitud_autorizacion!.nombre_autorizador }}
+                </p>
+
+                <p *ngIf="datosFactura()!.solicitud_autorizacion!.motivo_rechazo"
+                    class="text-xs text-red-700 mt-2 p-2 bg-red-100 rounded">
+                    {{ datosFactura()!.solicitud_autorizacion!.motivo_rechazo }}
+                </p>
+
+                <!-- Botón solicitar nueva autorización -->
+                <button *ngIf="datosFactura()!.solicitud_autorizacion!.estado === 'rechazada'" type="button"
+                    (click)="abrirModalAutorizacion()"
+                    class="mt-2 w-full px-3 py-1.5 text-xs font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition">
+                    Solicitar Nueva Autorización
+                </button>
+            </div>
+
+            <!-- ============================================================ -->
+            <!-- BOTÓN SOLICITAR AUTORIZACIÓN (primera vez)                   -->
+            <!-- ============================================================ -->
+            <button *ngIf="mostrarBotonAutorizacion()" type="button" (click)="abrirModalAutorizacion()"
+                class="w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition flex items-center justify-center gap-2">
+                <lucide-icon [img]="AlertCircle" class="w-4 h-4"></lucide-icon>
+                Solicitar Autorización
+            </button>
+
+            <!-- ============================================================ -->
+            <!-- FORMULARIO DE LIQUIDACIÓN                                    -->
+            <!-- ============================================================ -->
+            <form [formGroup]="formLiquidacion" (ngSubmit)="guardar()" class="space-y-4">
+
+                <!-- Vehículo -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Vehículo <span class="text-red-500">*</span>
+                    </label>
+                    <div class="relative">
+                        <lucide-icon [img]="Car" class="absolute left-1.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400"></lucide-icon>
+                        <!-- ❌ QUITAR [disabled]="!formularioHabilitado()" -->
+                        <select formControlName="vehiculoid"
+                            class="w-full pl-10 pr-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition disabled:bg-gray-100 disabled:cursor-not-allowed"
+                            [class.border-red-500]="esInvalido(formLiquidacion, 'vehiculoid')"
+                            [class.border-gray-300]="!esInvalido(formLiquidacion, 'vehiculoid')">
+                            <option value="">Seleccione un vehículo</option>
+                            <option *ngFor="let vehiculo of vehiculos()" [value]="vehiculo.idVehiculos">
+                                {{ vehiculo.placa }} - {{ vehiculo.marca }} ({{ vehiculo.tipo_vehiculo }})
+                            </option>
+                        </select>
+                    </div>
+                    <p *ngIf="esInvalido(formLiquidacion, 'vehiculoid')" class="mt-1 text-xs text-red-600">
+                        {{ obtenerError(formLiquidacion, 'vehiculoid') }}
+                    </p>
+                </div>
+                
+                <!-- Tipo de Apoyo -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Tipo de Apoyo <span class="text-red-500">*</span>
+                    </label>
+                    <!-- ❌ QUITAR [disabled]="!formularioHabilitado()" -->
+                    <select formControlName="tipoapoyoid" (change)="onTipoApoyoChange()"
+                        class="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition disabled:bg-gray-100 disabled:cursor-not-allowed"
+                        [class.border-red-500]="esInvalido(formLiquidacion, 'tipoapoyoid')"
+                        [class.border-gray-300]="!esInvalido(formLiquidacion, 'tipoapoyoid')">
+                        <option value="">Seleccione un tipo</option>
+                        <option *ngFor="let tipo of tiposApoyo()" [value]="tipo.idTiposApoyo">
+                            {{ tipo.nombre }}
+                        </option>
+                    </select>
+                    <p *ngIf="esInvalido(formLiquidacion, 'tipoapoyoid')" class="mt-1 text-xs text-red-600">
+                        {{ obtenerError(formLiquidacion, 'tipoapoyoid') }}
+                    </p>
+                </div>
+                
+                <!-- Descripción -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Descripción <span class="text-red-500">*</span>
+                    </label>
+                    <!-- ❌ QUITAR [disabled]="!formularioHabilitado()" -->
+                    <textarea formControlName="descripcion" rows="3" maxlength="500" placeholder="Descripción del gasto..."
+                        class="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 transition resize-none disabled:bg-gray-100 disabled:cursor-not-allowed"
+                        [class.border-red-500]="esInvalido(formLiquidacion, 'descripcion')"
+                        [class.border-gray-300]="!esInvalido(formLiquidacion, 'descripcion')"></textarea>
+                    <div class="flex items-center justify-between mt-1">
+                        <p *ngIf="esInvalido(formLiquidacion, 'descripcion')" class="text-xs text-red-600">
+                            {{ obtenerError(formLiquidacion, 'descripcion') }}
+                        </p>
+                        <p class="text-xs text-gray-500 ml-auto">
+                            {{ formLiquidacion.get('descripcion')?.value?.length || 0 }}/500 caracteres
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- Info sobre formulario deshabilitado -->
+                <div *ngIf="!formularioHabilitado() && modo === 'crear'"
+                    class="flex items-start gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm">
+                    <lucide-icon [img]="AlertCircle" class="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0"></lucide-icon>
+                    <p class="text-blue-800 text-xs">
+                        Complete la búsqueda de factura para habilitar el formulario.
+                    </p>
+                </div>
+
+            </form>
+
+        </div>
+
+        <!-- Footer -->
+        <div class="flex items-center justify-end gap-2 p-5 border-t border-gray-200 bg-gray-50 sticky bottom-0">
+            <button type="button" (click)="cerrarModal()" [disabled]="guardando()"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition disabled:opacity-50">
+                Cancelar
+            </button>
+            <button type="submit" (click)="guardar()"
+                [disabled]="formLiquidacion.invalid || !formularioHabilitado() || guardando()"
+                class="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+                <lucide-icon [img]="Save" class="w-4 h-4"></lucide-icon>
+                {{ textoBoton }}
+            </button>
+        </div>
+
+    </div>
+</div>
+
+<!-- MODAL DE AUTORIZACIÓN -->
+<app-modal-autorizacion *ngIf="mostrarModalAutorizacion()" [numeroFactura]="formBusqueda.value.numero_factura"
+    [diasHabilesExcedidos]="datosFactura()?.dias_habiles_transcurridos || 0" (cerrar)="cerrarModalAutorizacion()"
+    (guardado)="onAutorizacionCreada()">
+</app-modal-autorizacion>
