@@ -1,25 +1,25 @@
 // ============================================================================
-// TABLA DETALLE LIQUIDACIONES - CON ÍCONO SIMPLE DE CAMBIOS SOLICITADOS
+// TABLA DETALLE LIQUIDACIONES - REFACTORIZADO CON STORE CENTRALIZADO
 // ============================================================================
 
 import { CommonModule } from '@angular/common';
-import { Component, ViewChild, ElementRef, inject, OnInit, OnDestroy, signal, Input } from '@angular/core';
+import { Component, ViewChild, ElementRef, inject, signal, Input } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Subject, takeUntil } from 'rxjs';
 import Swal from 'sweetalert2';
 
 import { ModalDetalleLiquidacionNuevoComponentpresupuesto } from '../modal-detalle-liquidacion/modal-detalle-liquidacion.component';
 import { ModalConfirmarEliminacionComponentpresupuesto } from '../modal-confirmar-eliminacion/modal-confirmar-eliminacion.component';
 import { ModalVerCambiosUsuarioComponent } from '../modal-cambios-usuario/modal-ver-cambios-usuario.component';
 
-import { FacturasPlanEmpresarialService } from '../../services/facturas-presupuesto.service';
 import {
+    PresupuestoStore,
+    PresupuestoApiService,
     DetalleLiquidacionPE,
+    PermisosEdicion,
     FORMAS_PAGO,
-    FacturaPE,
-    PermisosEdicion
-} from '../../models/facturas-presupuesto.models';
-import { toNumber, toString, formatearMonto, formatearFecha } from '../../utils/format.utils';
+    formatearMonto,
+    toNumber
+} from '../../core';
 
 @Component({
     selector: 'app-tabla-detalle-liquidaciones-presupuesto',
@@ -33,133 +33,63 @@ import { toNumber, toString, formatearMonto, formatearFecha } from '../../utils/
     ],
     templateUrl: './tabla-detalle-liquidaciones-presupuesto.component.html'
 })
-export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, OnDestroy {
+export class TablaDetalleLiquidacionesComponentpresupuesto {
 
     @ViewChild('montoInput') montoInput?: ElementRef<HTMLInputElement>;
     @ViewChild('agenciaInput') agenciaInput?: ElementRef<HTMLSelectElement>;
 
-    // ============================================================================
-    // INPUTS PARA RECIBIR PERMISOS DESDE EL COMPONENTE PADRE
-    // ============================================================================
-
     @Input() permisosEdicion: PermisosEdicion | null = null;
 
-    private readonly service = inject(FacturasPlanEmpresarialService);
-    private readonly destroy$ = new Subject<void>();
+    private readonly store = inject(PresupuestoStore);
+    private readonly api = inject(PresupuestoApiService);
 
     // ============================================================================
-    // ESTADO DEL COMPONENTE
+    // SIGNALS DESDE EL STORE
+    // ============================================================================
+
+    readonly facturaActual = this.store.factura;
+    readonly detallesLiquidacion = this.store.detalles;
+    readonly agenciasDisponibles = this.store.agencias;
+
+    // ============================================================================
+    // ESTADO LOCAL
     // ============================================================================
 
     readonly mostrarModalDetalle = signal(false);
     readonly modoModal = signal<'crear' | 'editar'>('crear');
     readonly mostrarModalEliminar = signal(false);
-    readonly facturaActual = signal<FacturaPE | null>(null);
-    readonly detallesLiquidacion = signal<DetalleLiquidacionPE[]>([]);
-    readonly agenciasDisponibles = signal<any[]>([]);
-    readonly cargandoDetalles = signal<boolean>(false);
-    readonly guardandoCambios = signal<boolean>(false);
-
-    // MODAL DE CAMBIOS SOLICITADOS
     readonly mostrarModalCambios = signal(false);
     readonly detalleSeleccionadoParaCambios = signal<DetalleLiquidacionPE | null>(null);
-
-    // Permisos por defecto
-    readonly permisosDefecto = signal({
-        puedeVer: true,
-        puedeEditar: false,
-        puedeAgregar: false,
-        puedeEliminar: false,
-        razon: 'Calculando permisos...',
-        claseCSS: 'text-gray-600 bg-gray-50 border-gray-200'
-    });
+    readonly cargandoDetalles = signal(false);
+    readonly guardandoCambios = signal(false);
 
     registroEnEdicion: DetalleLiquidacionPE | null = null;
     indexEnEdicion: number | null = null;
     indexAEliminar: number | null = null;
     cargandoDetalle = false;
 
-    // Constantes
     readonly formasPago = FORMAS_PAGO;
 
-    ngOnInit(): void {
-        this.inicializarSuscripciones();
-    }
-
-    ngOnDestroy(): void {
-        this.destroy$.next();
-        this.destroy$.complete();
-    }
-
     // ============================================================================
-    // INICIALIZACIÓN
+    // PERMISOS
     // ============================================================================
 
-    private inicializarSuscripciones(): void {
-        // Suscripción a la factura actual
-        this.service.facturaActual$
-            .pipe(takeUntil(this.destroy$))
-            .subscribe(factura => {
-                this.facturaActual.set(factura);
-            });
-
-        // Suscripción a los detalles de liquidación
-        this.service.detallesLiquidacion$
-            .pipe(takeUntil(this.destroy$))
-            .subscribe(detalles => {
-                this.detallesLiquidacion.set(detalles);
-            });
-
-        // Suscripción a las agencias
-        this.service.agencias$
-            .pipe(takeUntil(this.destroy$))
-            .subscribe(agencias => this.agenciasDisponibles.set(agencias));
-
-        // Suscripción a estados de carga
-        this.service.cargandoDetalles$
-            .pipe(takeUntil(this.destroy$))
-            .subscribe(cargando => this.cargandoDetalles.set(cargando));
-
-        this.service.procesandoLiquidacion$
-            .pipe(takeUntil(this.destroy$))
-            .subscribe(guardando => this.guardandoCambios.set(guardando));
+    private _permisos(): PermisosEdicion {
+        return this.permisosEdicion || this.store.permisos();
     }
+
+    puedeEditarDetalles(): boolean { return this._permisos().puedeEditar; }
+    puedeAgregarDetalles(): boolean { return this._permisos().puedeAgregar; }
+    puedeEliminarDetalles(): boolean { return this._permisos().puedeEliminar; }
+    obtenerMensajePermisos(): string { return this._permisos().razon; }
+    obtenerClasePermisos(): string { return this._permisos().claseCSS; }
 
     // ============================================================================
-    // MÉTODOS PARA VERIFICAR PERMISOS
-    // ============================================================================
-
-    private obtenerPermisos(): PermisosEdicion {
-        return this.permisosEdicion || this.permisosDefecto();
-    }
-
-    puedeEditarDetalles(): boolean {
-        return this.obtenerPermisos().puedeEditar;
-    }
-
-    puedeAgregarDetalles(): boolean {
-        return this.obtenerPermisos().puedeAgregar;
-    }
-
-    puedeEliminarDetalles(): boolean {
-        return this.obtenerPermisos().puedeEliminar;
-    }
-
-    obtenerMensajePermisos(): string {
-        return this.obtenerPermisos().razon;
-    }
-
-    obtenerClasePermisos(): string {
-        return this.obtenerPermisos().claseCSS;
-    }
-
-    // ============================================================================
-    // MODAL DE CAMBIOS SOLICITADOS
+    // MODAL DE CAMBIOS
     // ============================================================================
 
     abrirModalCambios(detalle: DetalleLiquidacionPE): void {
         if (!detalle.id) return;
-
         this.detalleSeleccionadoParaCambios.set(detalle);
         this.mostrarModalCambios.set(true);
     }
@@ -175,25 +105,16 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
 
     abrirModal(): void {
         if (!this.puedeAgregarDetalles()) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Acción no permitida',
-                text: this.obtenerMensajePermisos()
-            });
+            this._mostrarAlerta('warning', 'Acción no permitida', this.obtenerMensajePermisos());
             return;
         }
 
-        const factura = this.facturaActual();
-        if (!factura?.numero_dte) {
-            Swal.fire({
-                icon: 'error',
-                title: 'Error',
-                text: 'No hay factura seleccionada para agregar detalles'
-            });
+        if (!this.store.factura()?.numero_dte) {
+            this._mostrarAlerta('error', 'Error', 'No hay factura seleccionada');
             return;
         }
 
-        this.registroEnEdicion = this.crearDetalleVacio();
+        this.registroEnEdicion = this._crearDetalleVacio();
         this.indexEnEdicion = null;
         this.modoModal.set('crear');
         this.mostrarModalDetalle.set(true);
@@ -201,59 +122,32 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
 
     abrirModalEditar(index: number): void {
         if (!this.puedeEditarDetalles()) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Edición no permitida',
-                text: this.obtenerMensajePermisos()
-            });
+            this._mostrarAlerta('warning', 'Edición no permitida', this.obtenerMensajePermisos());
             return;
         }
 
-        const detalles = this.detallesLiquidacion();
+        const detalles = this.store.detalles();
         if (index < 0 || index >= detalles.length) return;
 
-        const detalleAEditar = detalles[index];
         this.indexEnEdicion = index;
-        this.registroEnEdicion = detalleAEditar ? { ...detalleAEditar } : null;
+        this.registroEnEdicion = { ...detalles[index] };
         this.modoModal.set('editar');
         this.mostrarModalDetalle.set(true);
     }
 
     confirmarEliminacion(): void {
         if (!this.puedeEliminarDetalles()) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Eliminación no permitida',
-                text: this.obtenerMensajePermisos()
-            });
+            this._mostrarAlerta('warning', 'Eliminación no permitida', this.obtenerMensajePermisos());
             return;
         }
 
         if (this.indexAEliminar !== null) {
-            const detalles = this.detallesLiquidacion();
-            const detalle = detalles[this.indexAEliminar];
-
+            const detalle = this.store.detalles()[this.indexAEliminar];
             if (detalle?.id) {
-                this.service.eliminarDetalle(detalle.id).subscribe({
-                    next: (success) => {
-                        if (success) {
-                            this.cancelarEliminacion();
-                        }
-                    }
-                });
+                this.api.eliminarDetalle(detalle.id).subscribe(() => this.cancelarEliminacion());
             } else {
-                const nuevosDetalles = [...detalles];
-                nuevosDetalles.splice(this.indexAEliminar, 1);
-                this.detallesLiquidacion.set(nuevosDetalles);
+                this.store.eliminarDetalle(this.indexAEliminar);
                 this.cancelarEliminacion();
-
-                Swal.fire({
-                    icon: 'success',
-                    title: 'Eliminado',
-                    text: 'Detalle eliminado correctamente',
-                    timer: 2000,
-                    showConfirmButton: false
-                });
             }
         }
     }
@@ -263,92 +157,31 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
         this.mostrarModalEliminar.set(false);
     }
 
-    private crearDetalleVacio(): DetalleLiquidacionPE {
-        return {
-            id: undefined,
-            numero_orden: '',
-            agencia: '',
-            descripcion: '',
-            monto: 0,
-            correo_proveedor: '',
-            forma_pago: '',
-            banco: '',
-            cuenta: '',
-            editando: false,
-            guardando: false
-        };
-    }
-
     // ============================================================================
-    // MÉTODOS DE EVENTO
+    // EVENTOS
     // ============================================================================
 
-    onAgregar(): void {
-        this.abrirModal();
-    }
-
-    onEditar(index: number): void {
-        this.abrirModalEditar(index);
-    }
+    onAgregar(): void { this.abrirModal(); }
+    onEditar(index: number): void { this.abrirModalEditar(index); }
 
     onEliminar(index: number): void {
         if (!this.puedeEliminarDetalles()) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Eliminación no permitida',
-                text: this.obtenerMensajePermisos()
-            });
+            this._mostrarAlerta('warning', 'Eliminación no permitida', this.obtenerMensajePermisos());
             return;
         }
-
-        const detalles = this.detallesLiquidacion();
-        if (index < 0 || index >= detalles.length) return;
-
         this.indexAEliminar = index;
         this.mostrarModalEliminar.set(true);
     }
 
     onCopiar(index: number): void {
         if (!this.puedeAgregarDetalles()) {
-            Swal.fire({
-                icon: 'warning',
-                title: 'Copia no permitida',
-                text: this.obtenerMensajePermisos()
-            });
+            this._mostrarAlerta('warning', 'Copia no permitida', this.obtenerMensajePermisos());
             return;
         }
 
-        const detalles = this.detallesLiquidacion();
-        if (index < 0 || index >= detalles.length) return;
-
-        const detalleOriginal = detalles[index];
-
-        if (detalleOriginal.id) {
-            this.service.copiarDetalle(detalleOriginal.id).subscribe({
-                next: (success) => {
-                    if (success) {
-                        // Opcional: recargar detalles
-                    }
-                }
-            });
-        } else {
-            const copia: DetalleLiquidacionPE = {
-                ...detalleOriginal,
-                id: undefined,
-                descripcion: '[COPIA] ' + detalleOriginal.descripcion
-            };
-
-            const nuevosDetalles = [...detalles];
-            nuevosDetalles.splice(index + 1, 0, copia);
-            this.detallesLiquidacion.set(nuevosDetalles);
-
-            Swal.fire({
-                icon: 'success',
-                title: 'Copiado',
-                text: 'Detalle copiado correctamente',
-                timer: 2000,
-                showConfirmButton: false
-            });
+        const detalle = this.store.detalles()[index];
+        if (detalle?.id) {
+            this.api.copiarDetalle(detalle.id).subscribe();
         }
     }
 
@@ -358,50 +191,27 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
 
     iniciarEdicionMonto(index: number): void {
         if (!this.puedeEditarDetalles()) {
-            Swal.fire({
-                icon: 'info',
-                title: 'Edición no permitida',
-                text: this.obtenerMensajePermisos(),
-                timer: 3000,
-                showConfirmButton: false
-            });
+            this._mostrarAlertaTemporal('info', 'Edición no permitida', this.obtenerMensajePermisos());
             return;
         }
 
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
+        this._cancelarTodasLasEdiciones();
+        const detalle = this.store.detalles()[index];
         if (!detalle) return;
 
-        this.cancelarTodasLasEdiciones();
+        this.store.actualizarDetalle(detalle.id!, { _editandoMonto: true, _montoTemp: detalle.monto });
 
-        detalle._editandoMonto = true;
-        detalle._montoTemp = detalle.monto;
-
-        const nuevosDetalles = [...detalles];
-        nuevosDetalles[index] = { ...detalle };
-        this.detallesLiquidacion.set(nuevosDetalles);
-
-        setTimeout(() => {
-            if (this.montoInput?.nativeElement) {
-                this.montoInput.nativeElement.focus();
-                this.montoInput.nativeElement.select();
-            }
-        }, 0);
+        setTimeout(() => this.montoInput?.nativeElement?.focus(), 0);
     }
 
     guardarMonto(index: number): void {
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
-        if (!detalle || !detalle._editandoMonto) return;
+        const detalle = this.store.detalles()[index];
+        if (!detalle?._editandoMonto) return;
 
         const nuevoMonto = parseFloat(String(detalle._montoTemp || 0));
 
         if (isNaN(nuevoMonto) || nuevoMonto <= 0) {
-            Swal.fire({
-                icon: 'error',
-                title: 'Error',
-                text: 'El monto debe ser mayor a 0'
-            });
+            this._mostrarAlerta('error', 'Error', 'El monto debe ser mayor a 0');
             return;
         }
 
@@ -410,82 +220,23 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
             return;
         }
 
-        const factura = this.facturaActual();
-        if (factura) {
-            const totalOtrosDetalles = detalles
-                .filter((_, i) => i !== index)
-                .reduce((sum, d) => sum + d.monto, 0);
-
-            const nuevoTotal = totalOtrosDetalles + nuevoMonto;
-
-            if (nuevoTotal > factura.monto_total) {
-                const disponible = factura.monto_total - totalOtrosDetalles;
-                Swal.fire({
-                    icon: 'error',
-                    title: 'Monto excedido',
-                    text: `El monto máximo disponible es Q${disponible.toFixed(2)}`
-                });
-                return;
-            }
+        const disponible = this.store.calcularMontoDisponible(detalle.id);
+        if (nuevoMonto > disponible + detalle.monto) {
+            this._mostrarAlerta('error', 'Monto excedido', `El monto máximo disponible es Q${disponible.toFixed(2)}`);
+            return;
         }
 
         if (detalle.id) {
-            this.service.actualizarDetalle({ id: detalle.id, monto: nuevoMonto }).subscribe({
-                next: (success) => {
-                    if (success) {
-                        detalle.monto = nuevoMonto;
-                        detalle._editandoMonto = false;
-                        delete detalle._montoTemp;
-
-                        const nuevosDetalles = [...detalles];
-                        nuevosDetalles[index] = detalle;
-                        this.detallesLiquidacion.set(nuevosDetalles);
-                    } else {
-                        Swal.fire({
-                            icon: 'error',
-                            title: 'Error',
-                            text: 'No se pudo actualizar el monto'
-                        });
-                    }
-                },
-                error: (error) => {
-                    console.error('Error en suscripción:', error);
-                    Swal.fire({
-                        icon: 'error',
-                        title: 'Error',
-                        text: 'Error de conexión al actualizar el monto'
-                    });
-                }
-            });
+            this.api.actualizarDetalle({ id: detalle.id, monto: nuevoMonto }).subscribe();
         } else {
-            detalle.monto = nuevoMonto;
-            detalle._editandoMonto = false;
-            delete detalle._montoTemp;
-
-            const nuevosDetalles = [...detalles];
-            nuevosDetalles[index] = detalle;
-            this.detallesLiquidacion.set(nuevosDetalles);
-
-            Swal.fire({
-                icon: 'success',
-                title: 'Actualizado',
-                text: 'Monto actualizado correctamente',
-                timer: 1500,
-                showConfirmButton: false
-            });
+            this.store.actualizarDetalle(index, { monto: nuevoMonto, _editandoMonto: false });
         }
     }
 
     cancelarEdicionMonto(index: number): void {
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
-        if (detalle) {
-            detalle._editandoMonto = false;
-            delete detalle._montoTemp;
-
-            const nuevosDetalles = [...detalles];
-            nuevosDetalles[index] = { ...detalle };
-            this.detallesLiquidacion.set(nuevosDetalles);
+        const detalle = this.store.detalles()[index];
+        if (detalle?.id) {
+            this.store.actualizarDetalle(detalle.id, { _editandoMonto: false, _montoTemp: undefined });
         }
     }
 
@@ -495,44 +246,26 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
 
     iniciarEdicionAgencia(index: number): void {
         if (!this.puedeEditarDetalles()) {
-            Swal.fire({
-                icon: 'info',
-                title: 'Edición no permitida',
-                text: this.obtenerMensajePermisos(),
-                timer: 3000,
-                showConfirmButton: false
-            });
+            this._mostrarAlertaTemporal('info', 'Edición no permitida', this.obtenerMensajePermisos());
             return;
         }
 
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
+        this._cancelarTodasLasEdiciones();
+        const detalle = this.store.detalles()[index];
         if (!detalle) return;
 
-        this.cancelarTodasLasEdiciones();
-        (detalle as any)._editandoAgencia = true;
-        (detalle as any)._agenciaTemp = detalle.agencia;
+        this.store.actualizarDetalle(detalle.id!, { _editandoAgencia: true, _agenciaTemp: detalle.agencia });
 
-        setTimeout(() => {
-            if (this.agenciaInput?.nativeElement) {
-                this.agenciaInput.nativeElement.focus();
-            }
-        }, 0);
+        setTimeout(() => this.agenciaInput?.nativeElement?.focus(), 0);
     }
 
     guardarAgencia(index: number): void {
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
-        if (!detalle || !(detalle as any)._editandoAgencia) return;
+        const detalle = this.store.detalles()[index];
+        if (!detalle?._editandoAgencia) return;
 
-        const nuevaAgencia = (detalle as any)._agenciaTemp?.trim();
-
+        const nuevaAgencia = detalle._agenciaTemp?.trim();
         if (!nuevaAgencia) {
-            Swal.fire({
-                icon: 'error',
-                title: 'Error',
-                text: 'Debe seleccionar una agencia'
-            });
+            this._mostrarAlerta('error', 'Error', 'Debe seleccionar una agencia');
             return;
         }
 
@@ -542,239 +275,113 @@ export class TablaDetalleLiquidacionesComponentpresupuesto implements OnInit, On
         }
 
         if (detalle.id) {
-            this.service.actualizarDetalle({ id: detalle.id, agencia: nuevaAgencia }).subscribe({
-                next: (success) => {
-                    if (success) {
-                        detalle.agencia = nuevaAgencia;
-                        (detalle as any)._editandoAgencia = false;
-                        delete (detalle as any)._agenciaTemp;
-
-                        const nuevosDetalles = [...detalles];
-                        nuevosDetalles[index] = detalle;
-                        this.detallesLiquidacion.set(nuevosDetalles);
-                    }
-                }
-            });
+            this.api.actualizarDetalle({ id: detalle.id, agencia: nuevaAgencia }).subscribe();
         } else {
-            detalle.agencia = nuevaAgencia;
-            (detalle as any)._editandoAgencia = false;
-            delete (detalle as any)._agenciaTemp;
-
-            const nuevosDetalles = [...detalles];
-            nuevosDetalles[index] = detalle;
-            this.detallesLiquidacion.set(nuevosDetalles);
-
-            Swal.fire({
-                icon: 'success',
-                title: 'Actualizado',
-                text: 'Agencia actualizada correctamente',
-                timer: 1500,
-                showConfirmButton: false
-            });
+            this.store.actualizarDetalle(index, { agencia: nuevaAgencia, _editandoAgencia: false });
         }
     }
 
     cancelarEdicionAgencia(index: number): void {
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
-        if (detalle) {
-            (detalle as any)._editandoAgencia = false;
-            delete (detalle as any)._agenciaTemp;
+        const detalle = this.store.detalles()[index];
+        if (detalle?.id) {
+            this.store.actualizarDetalle(detalle.id, { _editandoAgencia: false, _agenciaTemp: undefined });
         }
+    }
+
+    // ============================================================================
+    // VER DETALLE COMPLETO
+    // ============================================================================
+
+    async verDetalleCompleto(index: number): Promise<void> {
+        const detalle = this.store.detalles()[index];
+        if (!detalle?.id) {
+            this._mostrarDetalleBasico(detalle);
+            return;
+        }
+
+        Swal.fire({ title: 'Cargando...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+        this.api.obtenerDetalleCompleto(detalle.id).subscribe({
+            next: (response) => {
+                Swal.close();
+                if (response.respuesta === 'success' && response.datos) {
+                    this._mostrarDetalleCompleto(response.datos);
+                } else {
+                    this._mostrarAlerta('error', 'Error', 'No se pudo obtener el detalle');
+                }
+            },
+            error: () => {
+                Swal.close();
+                this._mostrarAlerta('warning', 'Advertencia', 'Error al obtener el detalle');
+            }
+        });
     }
 
     // ============================================================================
     // UTILIDADES
     // ============================================================================
 
-    private cancelarTodasLasEdiciones(): void {
-        const detalles = this.detallesLiquidacion();
-        let cambios = false;
-
-        detalles.forEach((detalle, index) => {
-            if (detalle._editandoMonto) {
-                detalle._editandoMonto = false;
-                delete detalle._montoTemp;
-                cambios = true;
-            }
-            if ((detalle as any)._editandoAgencia) {
-                (detalle as any)._editandoAgencia = false;
-                delete (detalle as any)._agenciaTemp;
-                cambios = true;
+    private _cancelarTodasLasEdiciones(): void {
+        this.store.detalles().forEach(d => {
+            if (d.id && (d._editandoMonto || d._editandoAgencia)) {
+                this.store.actualizarDetalle(d.id, {
+                    _editandoMonto: false, _montoTemp: undefined,
+                    _editandoAgencia: false, _agenciaTemp: undefined
+                });
             }
         });
-
-        if (cambios) {
-            this.detallesLiquidacion.set([...detalles]);
-        }
     }
 
-    async verDetalleCompleto(index: number): Promise<void> {
-        const detalles = this.detallesLiquidacion();
-        const detalle = detalles[index];
-        if (!detalle) return;
-
-        if (detalle.id) {
-            this.cargandoDetalle = true;
-
-            Swal.fire({
-                title: 'Cargando detalle...',
-                html: 'Obteniendo información completa del registro',
-                allowOutsideClick: false,
-                showConfirmButton: false,
-                didOpen: () => {
-                    Swal.showLoading();
-                }
-            });
-
-            this.service.obtenerDetalleCompleto(detalle.id).subscribe({
-                next: (response) => {
-                    Swal.close();
-                    this.cargandoDetalle = false;
-
-                    if (response && response.respuesta === 'success' && response.datos) {
-                        this.mostrarDetalleCompleto(response.datos);
-                    } else {
-                        Swal.fire({
-                            icon: 'error',
-                            title: 'Error',
-                            text: 'No se pudo obtener el detalle completo'
-                        });
-                    }
-                },
-                error: () => {
-                    Swal.close();
-                    this.cargandoDetalle = false;
-                    Swal.fire({
-                        icon: 'warning',
-                        title: 'Advertencia',
-                        text: 'Error al obtener el detalle'
-                    });
-                }
-            });
-        } else {
-            this.mostrarDetalleBasico(detalle);
-        }
-    }
-
-    private mostrarDetalleCompleto(detalleCompleto: any): void {
-        const montoNormalizado = toNumber(detalleCompleto.monto, 0);
-        const fechaCreacion = detalleCompleto.fecha_creacion ?
-            new Date(detalleCompleto.fecha_creacion).toLocaleString('es-GT') : 'No registrada';
-        const fechaActualizacion = detalleCompleto.fecha_actualizacion ?
-            new Date(detalleCompleto.fecha_actualizacion).toLocaleString('es-GT') : 'No registrada';
-
-        const html = `
-        <div class="text-left space-y-3">
-            <div><strong>Orden:</strong> ${detalleCompleto.numero_orden || 'No especificada'}</div>
-            <div><strong>Agencia:</strong> ${detalleCompleto.agencia || 'No especificada'}</div>
-            <div><strong>Descripción:</strong> ${detalleCompleto.descripcion || 'Sin descripción'}</div>
-            <div><strong>Monto:</strong> ${formatearMonto(montoNormalizado)}</div>
-            <div><strong>Forma de Pago:</strong> ${this.obtenerTextoFormaPago(detalleCompleto.forma_pago)}</div>
-            <div><strong>Correo Proveedor:</strong> ${detalleCompleto.correo_proveedor || 'No especificado'}</div>
-            ${detalleCompleto.banco ? `<div><strong>Banco:</strong> ${detalleCompleto.banco}</div>` : ''}
-            ${detalleCompleto.cuenta ? `<div><strong>Cuenta:</strong> ${detalleCompleto.cuenta}</div>` : ''}
-            <div><strong>Fecha Creación:</strong> ${fechaCreacion}</div>
-            <div><strong>Fecha Actualización:</strong> ${fechaActualizacion}</div>
-            ${detalleCompleto.datos_especificos ? this.formatearDatosEspecificos(detalleCompleto.datos_especificos) : ''}
-        </div>
-    `;
-
-        Swal.fire({
-            title: `Detalle de Liquidación #${detalleCompleto.id || 'Nuevo'}`,
-            html: html,
-            width: '500px',
-            confirmButtonText: 'Cerrar',
-            confirmButtonColor: '#6b7280'
-        });
-    }
-
-    private mostrarDetalleBasico(detalle: DetalleLiquidacionPE): void {
-        const montoNormalizado = toNumber(detalle.monto, 0);
-
-        const html = `
-        <div class="text-left space-y-3">
-            <div><strong>Orden:</strong> ${detalle.numero_orden || 'No especificada'}</div>
-            <div><strong>Agencia:</strong> ${detalle.agencia || 'No especificada'}</div>
-            <div><strong>Descripción:</strong> ${detalle.descripcion || 'Sin descripción'}</div>
-            <div><strong>Monto:</strong> ${formatearMonto(montoNormalizado)}</div>
-            <div><strong>Forma de Pago:</strong> ${this.obtenerTextoFormaPago(detalle.forma_pago)}</div>
-            <div><strong>Correo Proveedor:</strong> ${detalle.correo_proveedor || 'No especificado'}</div>
-            ${detalle.banco ? `<div><strong>Banco:</strong> ${detalle.banco}</div>` : ''}
-            ${detalle.cuenta ? `<div><strong>Cuenta:</strong> ${detalle.cuenta}</div>` : ''}
-        </div>
-    `;
-
-        Swal.fire({
-            title: 'Detalle de Liquidación',
-            html: html,
-            width: '500px',
-            confirmButtonText: 'Cerrar',
-            confirmButtonColor: '#6b7280'
-        });
-    }
-
-    private formatearDatosEspecificos(datosEspecificos: any): string {
-        if (!datosEspecificos || typeof datosEspecificos !== 'object') return '';
-
-        let html = '<div class="mt-4 pt-3 border-t border-gray-200"><strong>Información Específica:</strong></div>';
-
-        Object.keys(datosEspecificos).forEach(key => {
-            const valor = datosEspecificos[key];
-            if (valor !== null && valor !== undefined && valor !== '') {
-                const labelFormateado = this.formatearLabelCampo(key);
-                const valorFormateado = this.formatearValorCampo(key, valor);
-                html += `<div><strong>${labelFormateado}:</strong> ${valorFormateado}</div>`;
-            }
-        });
-
-        return html;
-    }
-
-    private formatearLabelCampo(key: string): string {
-        const labels: { [key: string]: string } = {
-            'id_socio': 'ID Socio',
-            'nombre_socio': 'Nombre del Socio',
-            'numero_cuenta_deposito': 'Número de Cuenta',
-            'producto_cuenta': 'Producto',
-            'nombre_beneficiario': 'Beneficiario',
-            'consignacion': 'Consignación',
-            'no_negociable': 'No Negociable',
-            'nombre_cuenta': 'Nombre de Cuenta',
-            'numero_cuenta': 'Número de Cuenta',
-            'tipo_cuenta': 'Tipo de Cuenta',
-            'observaciones': 'Observaciones',
-            'nota': 'Nota'
+    private _crearDetalleVacio(): DetalleLiquidacionPE {
+        return {
+            numero_orden: '', agencia: '', descripcion: '', monto: 0,
+            correo_proveedor: '', forma_pago: '', banco: '', cuenta: ''
         };
-
-        return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     }
 
-    private formatearValorCampo(key: string, valor: any): string {
-        if (typeof valor === 'boolean') {
-            return valor ? 'Sí' : 'No';
-        }
+    private _mostrarAlerta(icon: 'success' | 'error' | 'warning' | 'info', title: string, text: string): void {
+        Swal.fire({ icon, title, text });
+    }
 
-        if (key.includes('monto') && typeof valor === 'number') {
-            return formatearMonto(valor);
-        }
+    private _mostrarAlertaTemporal(icon: 'success' | 'error' | 'warning' | 'info', title: string, text: string): void {
+        Swal.fire({ icon, title, text, timer: 3000, showConfirmButton: false });
+    }
 
-        return String(valor);
+    private _mostrarDetalleCompleto(data: any): void {
+        const monto = toNumber(data.monto, 0);
+        Swal.fire({
+            title: `Detalle #${data.id || 'Nuevo'}`,
+            html: `
+                <div class="text-left space-y-2">
+                    <div><strong>Orden:</strong> ${data.numero_orden || '-'}</div>
+                    <div><strong>Agencia:</strong> ${data.agencia || '-'}</div>
+                    <div><strong>Descripción:</strong> ${data.descripcion || '-'}</div>
+                    <div><strong>Monto:</strong> ${formatearMonto(monto)}</div>
+                    <div><strong>Forma de Pago:</strong> ${this.obtenerTextoFormaPago(data.forma_pago)}</div>
+                    ${data.banco ? `<div><strong>Banco:</strong> ${data.banco}</div>` : ''}
+                    ${data.cuenta ? `<div><strong>Cuenta:</strong> ${data.cuenta}</div>` : ''}
+                </div>`,
+            width: '500px',
+            confirmButtonText: 'Cerrar'
+        });
+    }
+
+    private _mostrarDetalleBasico(detalle: DetalleLiquidacionPE): void {
+        this._mostrarDetalleCompleto(detalle);
     }
 
     obtenerTextoFormaPago(formaPago: string): string {
-        const forma = this.formasPago.find(f => f.id === formaPago);
-        return forma?.nombre || formaPago || 'Sin especificar';
+        return this.formasPago.find(f => f.id === formaPago)?.nombre || formaPago || 'Sin especificar';
     }
 
     obtenerClaseFormaPago(formaPago: string): string {
-        const colores: { [key: string]: string } = {
-            'deposito': 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300',
-            'transferencia': 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300',
-            'cheque': 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300',
-            'efectivo': 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300'
+        const colores: Record<string, string> = {
+            'deposito': 'bg-blue-100 text-blue-800',
+            'transferencia': 'bg-green-100 text-green-800',
+            'cheque': 'bg-purple-100 text-purple-800',
+            'efectivo': 'bg-orange-100 text-orange-800'
         };
-        return colores[formaPago] || 'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-300';
+        return colores[formaPago] || 'bg-gray-100 text-gray-800';
     }
 
     trackById(index: number, detalle: DetalleLiquidacionPE): any {

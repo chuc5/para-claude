@@ -1,101 +1,66 @@
 // ============================================================================
-// COMPONENTE DE ÓRDENES - CORREGIDO SIN DUPLICACIONES
+// COMPONENTE DE ÓRDENES - REFACTORIZADO CON STORE CENTRALIZADO
 // ============================================================================
 
 import { CommonModule } from '@angular/common';
-import { Component, OnInit, OnDestroy, signal, inject } from '@angular/core';
-import { Subject, takeUntil } from 'rxjs';
+import { Component, signal, inject, computed } from '@angular/core';
 
-import { OrdenesPlanEmpresarialService, OrdenPE } from '../../services/ordenes-presupuesto.service';
 import { ModalAnticiposComponentpresupuesto } from '../modal-anticipos/modal-anticipos.component';
+import { PresupuestoStore, PresupuestoApiService, OrdenPE, formatearMonto } from '../../core';
 
 @Component({
-  selector: 'app-ordenes-plan-empresarial-simple-presupuesto',
-  standalone: true,
-  imports: [CommonModule, ModalAnticiposComponentpresupuesto],
-  templateUrl: './ordenes-plan-empresarial.component.html',
+    selector: 'app-ordenes-plan-empresarial-simple-presupuesto',
+    standalone: true,
+    imports: [CommonModule, ModalAnticiposComponentpresupuesto],
+    templateUrl: './ordenes-plan-empresarial.component.html',
 })
-export class OrdenesPlanEmpresarialSimpleComponentpresupuesto implements OnInit, OnDestroy {
+export class OrdenesPlanEmpresarialSimpleComponentpresupuesto {
 
-  private readonly service = inject(OrdenesPlanEmpresarialService);
-  private readonly destroy$ = new Subject<void>();
+    private readonly store = inject(PresupuestoStore);
+    private readonly api = inject(PresupuestoApiService);
 
-  // Estado del componente
-  readonly ordenes = signal<OrdenPE[]>([]);
-  readonly cargando = signal<boolean>(false);
-  readonly modalVisible = signal<boolean>(false);
-  readonly ordenSeleccionada = signal<OrdenPE | null>(null);
+    // ============================================================================
+    // SIGNALS DESDE EL STORE
+    // ============================================================================
 
-  ngOnInit(): void {
-    this.inicializarSuscripciones();
-    // NO cargar datos aquí - el contenedor padre ya los carga
-  }
+    readonly ordenes = this.store.ordenes;
+    readonly resumen = this.store.resumenOrdenes;
+    readonly cargando = computed(() => this.store.carga().ordenes);
 
-  ngOnDestroy(): void {
-    this.destroy$.next();
-    this.destroy$.complete();
-  }
+    // Estado local del modal
+    readonly modalVisible = signal(false);
+    readonly ordenSeleccionada = signal<OrdenPE | null>(null);
 
-  // ============================================================================
-  // INICIALIZACIÓN
-  // ============================================================================
+    // Utilidad de formateo
+    readonly formatearMonto = formatearMonto;
 
-  private inicializarSuscripciones(): void {
-    this.service.ordenes$
-      .pipe(takeUntil(this.destroy$))
-      .subscribe(ordenes => this.ordenes.set(ordenes));
+    // ============================================================================
+    // ACCIONES
+    // ============================================================================
 
-    this.service.cargando$
-      .pipe(takeUntil(this.destroy$))
-      .subscribe(cargando => this.cargando.set(cargando));
-  }
-
-  // ============================================================================
-  // ACCIONES DEL COMPONENTE
-  // ============================================================================
-
-  refrescar(): void {
-    // Solo refrescar si no se está cargando ya
-    if (!this.cargando()) {
-      this.service.cargarOrdenes().subscribe();
+    refrescar(): void {
+        if (!this.store.carga().ordenes) {
+            this.api.cargarOrdenes().subscribe();
+        }
     }
-  }
 
-  abrirModalAnticipos(orden: OrdenPE): void {
-    this.ordenSeleccionada.set(orden);
-    this.modalVisible.set(true);
-  }
-
-  cerrarModal(): void {
-    this.modalVisible.set(false);
-    this.ordenSeleccionada.set(null);
-  }
-
-  onSolicitudExitosa(): void {
-    // Mantener el modal abierto pero refrescar datos solo si no se está cargando
-    if (!this.cargando()) {
-      this.service.cargarOrdenes().subscribe();
+    abrirModalAnticipos(orden: OrdenPE): void {
+        this.ordenSeleccionada.set(orden);
+        this.modalVisible.set(true);
     }
-  }
 
-  // ============================================================================
-  // MÉTODOS DE UTILIDAD
-  // ============================================================================
+    cerrarModal(): void {
+        this.modalVisible.set(false);
+        this.ordenSeleccionada.set(null);
+    }
 
-  resumen(): { totalOrdenes: number; ordenesConPendientes: number } {
-    return this.service.obtenerResumen();
-  }
+    onSolicitudExitosa(): void {
+        if (!this.store.carga().ordenes) {
+            this.api.cargarOrdenes().subscribe();
+        }
+    }
 
-  formatearMonto(monto: number): string {
-    return new Intl.NumberFormat('es-GT', {
-      style: 'currency',
-      currency: 'GTQ',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(monto);
-  }
-
-  trackByOrden(index: number, orden: OrdenPE): number {
-    return orden.numero_orden;
-  }
+    trackByOrden(index: number, orden: OrdenPE): number {
+        return orden.numero_orden;
+    }
 }
