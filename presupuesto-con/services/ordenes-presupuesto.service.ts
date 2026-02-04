@@ -180,7 +180,6 @@ export class OrdenesPlanEmpresarialService {
                 }
             }),
             catchError((error) => {
-                console.error('Error al solicitar autorización:', error);
                 this.api.mensajeServidor('error', 'Error al enviar la solicitud de autorización');
                 return of(false);
             }),

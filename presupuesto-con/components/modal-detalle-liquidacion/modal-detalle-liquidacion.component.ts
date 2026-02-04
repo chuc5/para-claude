@@ -152,7 +152,7 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
             });
     }
 
-    
+
     // Agrega este nuevo método:
     private actualizarValidacionOrden(formaPago: string) {
         const ordenControl = this.formularioPrincipal.get('numero_orden');
@@ -164,22 +164,31 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
             // Para costo asumido: orden NO es requerida, área SÍ es requerida
             ordenControl.clearValidators();
             ordenControl.setValue('0');
-            ordenControl.disable(); // ✅ Deshabilitar desde código
+            ordenControl.disable();
 
             if (areaControl) {
                 areaControl.setValidators([Validators.required]);
-                areaControl.enable(); // ✅ Habilitar desde código
+                areaControl.enable();
             }
         } else {
-            // Para otros tipos: orden SÍ es requerida, área NO es requerida
-            ordenControl.setValidators([Validators.required]);
-            ordenControl.enable(); // ✅ Habilitar desde código
+            // ✅ SOLUCIÓN: En modo edición, si ya hay un numero_orden, no lo requieras
+            if (this.modo === 'editar' && this.registro?.numero_orden) {
+                // No cambiar el valor que ya tiene
+                ordenControl.clearValidators();
+                ordenControl.setValidators([Validators.required]);
+                ordenControl.enable();
+                // Mantener el valor actual si existe
+                if (!ordenControl.value) {
+                    ordenControl.setValue(String(this.registro.numero_orden));
+                }
+            } else {
+                ordenControl.setValidators([Validators.required]);
+                ordenControl.enable();
+            }
 
             if (areaControl) {
                 areaControl.clearValidators();
                 areaControl.setValue('');
-                // Opcional: deshabilitar el campo cuando no sea costo asumido
-                // areaControl.disable();
             }
         }
 
@@ -256,12 +265,23 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
 
     cargarDatosParaEdicion() {
         if (!this.registro || !this.formularioPrincipal) return;
-        const areaPresupuestoId = this.registro.area_presupuesto
-            ? Number(this.registro.area_presupuesto)
-            : null;
+
+        // Manejar area_presupuesto - puede venir del objeto principal o de datos_especificos
+        let areaPresupuestoId: number | null = null;
+
+        if (this.registro.area_presupuesto) {
+            areaPresupuestoId = Number(this.registro.area_presupuesto);
+        } else if (this.registro.datos_especificos && this.registro.datos_especificos.area_presupuesto) {
+            areaPresupuestoId = Number(this.registro.datos_especificos.area_presupuesto);
+        }
+
+        // ✅ SOLUCIÓN: Convertir numero_orden a string y manejar casos especiales
+        const numeroOrden = this.registro.numero_orden
+            ? String(this.registro.numero_orden)
+            : '';
 
         this.formularioPrincipal.patchValue({
-            numero_orden: this.registro.numero_orden || '',
+            numero_orden: numeroOrden, // ✅ Ahora es string
             agencia: this.registro.agencia || '',
             descripcion: this.registro.descripcion || '',
             monto: this.registro.monto || null,
@@ -269,7 +289,7 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
             forma_pago: this.registro.forma_pago || '',
             banco: this.registro.banco || '',
             cuenta: this.registro.cuenta || '',
-            area_presupuesto: areaPresupuestoId // NUEVO
+            area_presupuesto: areaPresupuestoId
         });
 
         setTimeout(() => {
@@ -289,7 +309,6 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
         if (!formaPago) return;
 
         if (this.requiereFormularioEspecifico(formaPago)) {
-            console.log(`[EDICIÓN] Mostrando formulario específico para: ${formaPago}`);
 
             setTimeout(() => {
                 this.mostrarFormularioEspecifico.set(true);
@@ -328,7 +347,6 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
 
             setTimeout(() => {
                 this.mostrarFormularioEspecifico.set(true);
-                console.log(`[CAMBIO] Mostrando formulario específico para: ${forma_pago}`);
                 this.cdr.markForCheck();
             }, 0);
         } else {
@@ -339,7 +357,6 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
 
             setTimeout(() => {
                 this.mostrarFormularioEspecifico.set(false);
-                console.log(`[CAMBIO] Ocultando formulario específico para: ${forma_pago}`);
                 this.cdr.markForCheck();
             }, 0);
         }
@@ -659,5 +676,37 @@ export class ModalDetalleLiquidacionNuevoComponentpresupuesto implements OnInit,
 
     trackByBanco(index: number, banco: BancoPE): number {
         return banco.id_banco;
+    }
+
+    // ============================================================================
+    // GETTER PARA PASAR DATOS A FORMULARIOS ESPECÍFICOS
+    // ============================================================================
+
+    /**
+     * Combina los datos del formulario principal con datos_especificos del registro
+     * para pasarlos a los formularios específicos de cada forma de pago
+     */
+    get datosParaFormularioEspecifico(): any {
+        // En modo crear, solo pasar valores actuales del formulario
+        if (this.modo === 'crear' || !this.registro) {
+            return {
+                ...this.formularioPrincipal.value
+            };
+        }
+
+        // En modo edición, combinar datos del formulario con datos_especificos
+        const datosBase = {
+            ...this.formularioPrincipal.value
+        };
+
+        // Si hay datos_especificos, combinarlos
+        if (this.registro.datos_especificos && typeof this.registro.datos_especificos === 'object') {
+            return {
+                ...datosBase,
+                ...this.registro.datos_especificos
+            };
+        }
+
+        return datosBase;
     }
 }

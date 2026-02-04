@@ -33,7 +33,6 @@ export class CambiosUsuarioService {
      * @returns Observable con array de cambios
      */
     obtenerCambiosDetalle(detalleId: number): Observable<CambioSolicitadoUsuario[]> {
-        console.log('🔍 Solicitando cambios para detalle:', detalleId);
 
         return this.api.query({
             ruta: 'contabilidad/obtenerCambiosSolicitadosPorDetalle',
@@ -41,7 +40,6 @@ export class CambiosUsuarioService {
             body: { detalle_liquidacion_id: detalleId }
         }).pipe(
             map((response: any) => {
-                console.log('📦 Respuesta recibida:', response);
 
                 // Validar que la respuesta sea exitosa
                 if (response.respuesta !== 'success') {
@@ -57,21 +55,15 @@ export class CambiosUsuarioService {
                     // Si datos.cambios existe, usarlo
                     if (response.datos.cambios && Array.isArray(response.datos.cambios)) {
                         cambios = response.datos.cambios;
-                        console.log('✅ Cambios encontrados en datos.cambios:', cambios.length);
                     }
                     // Si datos es directamente un array, usarlo
                     else if (Array.isArray(response.datos)) {
                         cambios = response.datos;
-                        console.log('✅ Cambios encontrados en datos (array directo):', cambios.length);
                     }
                     // Si hay un solo cambio en datos
                     else if (typeof response.datos === 'object') {
-                        cambios = [response.datos];
-                        console.log('✅ Cambio único encontrado en datos:', cambios.length);
-                    }
+                        cambios = [response.datos];                 }
                 }
-
-                console.log('📊 Total de cambios procesados:', cambios.length);
                 return cambios;
             }),
             catchError((error) => {
@@ -89,7 +81,6 @@ export class CambiosUsuarioService {
      * @returns Observable con resultado de la operación
      */
     marcarCambioComoRealizado(cambioId: number, observaciones?: string): Observable<boolean> {
-        console.log('🔄 Marcando cambio como realizado:', cambioId);
 
         const payload: MarcarCambioRealizadoPayload = {
             id: cambioId,
@@ -102,15 +93,12 @@ export class CambiosUsuarioService {
             body: payload
         }).pipe(
             map((response: any) => {
-                console.log('📦 Respuesta marcar realizado:', response);
-
                 if (response.respuesta === 'success' || response.respuesta === 'operacion_exitosa') {
                     const mensaje = Array.isArray(response.mensaje)
                         ? response.mensaje[0]
                         : response.mensaje || MENSAJES_CAMBIOS_USUARIO.EXITO.CAMBIO_MARCADO;
 
                     this.api.mensajeServidor('success', mensaje);
-                    console.log('✅ Cambio marcado exitosamente');
                     return true;
                 } else {
                     const mensajeError = Array.isArray(response.mensaje)

@@ -89,8 +89,14 @@
                             [ngClass]="{'border-red-300 dark:border-red-500': campoInvalido('numero_orden'), 'bg-gray-100 dark:bg-gray-600': tipoSeleccionado() === 'costoasumido'}">
                             <option value="">Seleccionar orden...</option>
                             <option value="0" *ngIf="tipoSeleccionado() === 'costoasumido'">No aplica</option>
-                            <option *ngFor="let orden of obtenerOrdenesDisponibles(); trackBy: trackByOrden"
-                                [value]="orden.numero_orden">
+                        
+                            <!-- ✅ Opción para mantener el valor actual en modo edición -->
+                            <option *ngIf="modo === 'editar' && registro?.numero_orden" [value]="registro?.numero_orden"
+                                [selected]="formularioPrincipal.get('numero_orden')?.value == registro?.numero_orden">
+                                Orden #{{ registro?.numero_orden }} (Actual)
+                            </option>
+                        
+                            <option *ngFor="let orden of obtenerOrdenesDisponibles(); trackBy: trackByOrden" [value]="orden.numero_orden">
                                 Orden #{{ orden.numero_orden }} - Q{{ orden.total | number:'1.2-2' }}
                                 <span *ngIf="orden.area"> ({{ orden.area }})({{ orden.presupuesto }})</span>
                             </option>
@@ -221,27 +227,30 @@
                     <ng-container [ngSwitch]="tipoSeleccionado()">
                         <!-- Formulario de depósito -->
                         <app-form-pago-deposito-presupuesto *ngSwitchCase="'deposito'"
-                            [agencias]="agenciasDisponibles()" (guardar)="onGuardarDesdeForm($event)">
+                            [data]="datosParaFormularioEspecifico" [agencias]="agenciasDisponibles()"
+                            (guardar)="onGuardarDesdeForm($event)">
                         </app-form-pago-deposito-presupuesto>
 
                         <!-- Formulario de transferencia -->
                         <app-form-pago-transferencia-presupuesto *ngSwitchCase="'transferencia'"
-                            [agencias]="agenciasDisponibles()" (guardar)="onGuardarDesdeForm($event)">
+                            [data]="datosParaFormularioEspecifico" [agencias]="agenciasDisponibles()"
+                            (guardar)="onGuardarDesdeForm($event)">
                         </app-form-pago-transferencia-presupuesto>
 
                         <!-- Formulario de cheque -->
-                        <app-form-pago-cheque-presupuesto *ngSwitchCase="'cheque'" [agencias]="agenciasDisponibles()"
+                        <app-form-pago-cheque-presupuesto *ngSwitchCase="'cheque'"
+                            [data]="datosParaFormularioEspecifico" [agencias]="agenciasDisponibles()"
                             (guardar)="onGuardarDesdeForm($event)">
                         </app-form-pago-cheque-presupuesto>
 
                         <!-- Selector de tarjeta -->
-                        <app-select-pago-tarjeta-presupuesto *ngSwitchCase="'tarjeta'" [data]="registro"
-                            (guardar)="onGuardarDesdeForm($event)">
+                        <app-select-pago-tarjeta-presupuesto *ngSwitchCase="'tarjeta'"
+                            [data]="datosParaFormularioEspecifico" (guardar)="onGuardarDesdeForm($event)">
                         </app-select-pago-tarjeta-presupuesto>
 
                         <!-- Selector de anticipo -->
-                        <app-select-pago-anticipo-presupuesto *ngSwitchCase="'anticipo'" [data]="registro"
-                            (guardar)="onGuardarDesdeForm($event)">
+                        <app-select-pago-anticipo-presupuesto *ngSwitchCase="'anticipo'"
+                            [data]="datosParaFormularioEspecifico" (guardar)="onGuardarDesdeForm($event)">
                         </app-select-pago-anticipo-presupuesto>
                     </ng-container>
                 </div>

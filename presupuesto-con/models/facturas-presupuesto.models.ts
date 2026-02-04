@@ -92,6 +92,9 @@ export interface DetalleLiquidacionPE {
     datos_especificos?: any;
     informacion_adicional?: any;
     area_presupuesto?: number | string;
+    nom_area_presupuesto?: string;
+    driveId?: string;
+    
 }
 
 export interface OrdenPE {

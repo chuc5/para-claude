@@ -110,7 +110,6 @@ export class FacturasPlanEmpresarialService {
             switchMap((response: ApiResponse<FacturaPE[]>) => {
                 if (response.respuesta === 'success' && response.datos && response.datos.length > 0) {
                     const factura = this.mapearFacturaApi(response.datos[0]);
-                    console.log('FACTURA MAPEADA CON DÍAS HÁBILES:', factura);
                     this._facturaActual$.next(factura);
 
                     // Cargar detalles después de establecer la factura
@@ -473,7 +472,6 @@ export class FacturasPlanEmpresarialService {
      * Mapear factura desde API - ACTUALIZADO PARA PROCESAR DÍAS HÁBILES
      */
     private mapearFacturaApi(api: any): FacturaPE {
-        console.log('MAPEANDO FACTURA RAW CON DÍAS HÁBILES:', api);
 
         const facturaMapeda: FacturaPE = {
             id: api.id,
@@ -513,7 +511,6 @@ export class FacturasPlanEmpresarialService {
             dias_habiles: api.dias_habiles ? this.mapearDiasHabiles(api.dias_habiles) : undefined
         };
 
-        console.log('FACTURA MAPEADA FINAL CON DÍAS HÁBILES:', facturaMapeda);
         return facturaMapeda;
     }
 
@@ -548,7 +545,9 @@ export class FacturasPlanEmpresarialService {
             cuenta: api.cuenta || '',
             tiene_cambios_pendientes: this.toNumber(api.tiene_cambios_pendientes) || 0,
             editando: false,
-            guardando: false
+            guardando: false,
+            driveId: api.driveId || '',
+            
         };
     }
 

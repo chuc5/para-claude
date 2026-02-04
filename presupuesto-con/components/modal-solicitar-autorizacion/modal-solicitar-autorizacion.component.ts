@@ -83,12 +83,11 @@ export class ModalSolicitarAutorizacionComponentpresupuesto implements OnInit {
      * Cerrar con Escape
      */
     @HostListener('document:keydown.escape', ['$event'])
-    onEscapeKey(event: KeyboardEvent): void {
+    onEscapeKey(event: Event): void {
         if (!this.form.dirty || confirm('¿Está seguro que desea cerrar sin enviar la solicitud?')) {
             this.cerrar.emit();
         }
     }
-
     // ============================================================================
     // ACCIONES PRINCIPALES
     // ============================================================================

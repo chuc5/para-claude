@@ -85,14 +85,15 @@
             </div>
 
             <!-- Segunda fila: Liquidaciones - Componente autónomo -->
-            <div class="w-full">
+            <div class="w-full mb-10">
                 <app-detalle-liquidizaciones-pe-presupuesto></app-detalle-liquidizaciones-pe-presupuesto>
             </div>
 
         </div>
 
         <!-- Footer informativo - ACTUALIZADO -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-3">
+        <div
+            class="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-3 mb-96">
             <div class="flex justify-between items-center text-xs text-gray-500 dark:text-gray-400">
                 <span>
                     Última actualización: {{ fechaUltimaActualizacion() | date:'dd/MM/yyyy HH:mm:ss' }}
@@ -113,6 +114,23 @@
                 </div>
             </div>
         </div>
-
+        <!-- INFO -->
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
+            <div class="flex items-start gap-3">
+                <div class="text-blue-800">
+                    <p class="font-medium mb-1">Información importante:</p>
+                    <ul class="text-xs list-disc list-inside space-y-0.5 text-blue-700">
+                        <li>Puedes registrar múltiples Liquidaciones</li>
+                        <li>No puedes sobrepasar el límite de la factura</li>
+                        <li>No puedes sobrepasar el límite de la orden</li>
+                        <li>Tienes 5 dias habiles para realizar tus gestiones</li>
+                        <li>Las liquidaciones que sobrepasan los dias habiles necesitan de una autorizacion </li>
+                        <li>Contacta al area de contabilidad si tienes dudas sobre el proceso</li>
+                        <li>Contacta al area de programacion por fallos del sistema</li>
+                        
+                    </ul>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
