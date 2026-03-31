@@ -198,6 +198,7 @@ class MantenimientoLiquidacionesHelper
             ucf.dias_presupuesto,
             ag.nombre  AS agencia,
             pu.nombre  AS puesto,
+            pg.monto_mensual,
             pg.monto_anual,
             pg.monto_diario
         FROM apoyo_combustibles.usuarioscontrolfechas AS ucf
@@ -246,6 +247,7 @@ class MantenimientoLiquidacionesHelper
             ucf.dias_presupuesto,
             ag.nombre  AS agencia,
             pu.nombre  AS puesto,
+            pg.monto_mensual,
             pg.monto_anual,
             pg.monto_diario
         FROM apoyo_combustibles.usuarioscontrolfechas AS ucf
@@ -777,7 +779,6 @@ class MantenimientoLiquidacionesHelper
             $inicio = $row['fecha_ingreso'];
             $fin    = $row['fecha_egreso'] ?? date('Y-12-31');
 
-            // Determinar tipo de período
             $tipoPeriodo = 'normal';
             if ($row['es_nuevo'] && (int) $row['dias_presupuesto'] > 0) {
                 $fechaFinPrueba = (new \DateTime($inicio))
@@ -795,11 +796,12 @@ class MantenimientoLiquidacionesHelper
                 'puestoid'                => (int) $row['puestoid'],
                 'agencia'                 => $row['agencia'],
                 'puesto'                  => $row['puesto'],
-                'monto_anual'             => (float) ($row['monto_anual'] ?? 0),
-                'monto_diario'            => (float) ($row['monto_diario'] ?? 0),
-                'es_nuevo'                => (bool) $row['es_nuevo'],
-                'porcentaje_presupuesto'  => (int) $row['porcentaje_presupuesto'],
-                'dias_presupuesto'        => (int) $row['dias_presupuesto'],
+                'monto_mensual'           => (float) ($row['monto_mensual'] ?? 0),
+                'monto_anual'             => (float) ($row['monto_anual']   ?? 0),
+                'monto_diario'            => (float) ($row['monto_diario']  ?? 0),
+                'es_nuevo'                => (bool)  $row['es_nuevo'],
+                'porcentaje_presupuesto'  => (int)   $row['porcentaje_presupuesto'],
+                'dias_presupuesto'        => (int)   $row['dias_presupuesto'],
                 'inicio_efectivo'         => $inicio,
                 'fin_efectivo'            => $fin,
                 'tipo_periodo'            => $tipoPeriodo,
@@ -866,19 +868,15 @@ class MantenimientoLiquidacionesHelper
     ): ?array {
         $finUltimo = $ultimoPeriodo['fin_efectivo'];
 
-        // Si el último UCF cubre hasta hoy o más → no hay gap
         if ($finUltimo >= $fechaHasta) return null;
 
-        // El período en curso empieza el día siguiente al fin del último UCF
         $inicioCurso = (new \DateTime($finUltimo))->modify('+1 day')->format('Y-m-d');
 
         if ($inicioCurso > $fechaHasta) return null;
 
-        // Recortar al rango de análisis
         $inicioCurso = max($inicioCurso, $fechaDesde);
         $finCurso    = $fechaHasta;
 
-        // ── DELEGADO A PresupuestoRangoHelper ──
         $pg = $this->presupuestoRangoHelper->obtenerPorAgenciaPuesto(
             $ultimoPeriodo['agenciaid'],
             $ultimoPeriodo['puestoid'],
@@ -887,14 +885,23 @@ class MantenimientoLiquidacionesHelper
 
         if (!$pg) return null;
 
+        // Presupuesto con tarifa mensual variable (monto_mensual / días_del_mes)
+        $periodoSimple = [
+            'monto_mensual'          => (float) ($pg['monto_mensual'] ?? 0),
+            'es_nuevo'               => false,
+            'dias_presupuesto'       => 0,
+            'porcentaje_presupuesto' => 100,
+            'inicio_efectivo'        => $inicioCurso,
+        ];
+        $presupuestoAsignado = $this->presupuestoRangoHelper->calcularPorRango(
+            $periodoSimple, $inicioCurso, $finCurso
+        );
+        $presupuestoDiario = (float) ($pg['monto_diario'] ?? 0);
+
         $dtI  = new \DateTime($inicioCurso);
         $dtF  = new \DateTime($finCurso);
         $dias = $dtI->diff($dtF)->days + 1;
 
-        $presupuestoDiario   = (float) $pg['monto_diario'];
-        $presupuestoAsignado = $presupuestoDiario * $dias;
-
-        // Liquidaciones del gap
         $liquidacionesCurso = $this->filtrarLiquidacionesPorRango(
             $liquidacionesUsuario, $inicioCurso, $finCurso
         );

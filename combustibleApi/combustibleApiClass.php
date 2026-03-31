@@ -4592,38 +4592,33 @@ final class combustibleApiClass extends ConexionBD
             $this->_inicializarHelpersLiquidaciones();
             $anio = date('Y');
 
-            // 1. Obtener presupuesto anual
             $presupuesto = $this->presupuestoAnualHelper->obtener($anio);
 
             if (!$presupuesto) {
                 return $this->res->fail('No existe presupuesto configurado para su agencia y puesto');
             }
 
-            // 2. Calcular consumo anual
-            // Reemplazar la línea de consumidoAnual por esto:
-            $detalle       = $presupuesto['detalle_periodo_actual'] ?? [];
-            $fechaDesde    = $detalle['fecha_consumo_desde'] ?? null;
-            $fechaHasta    = $detalle['fecha_consumo_hasta'] ?? null;
+            $detalle    = $presupuesto['detalle_periodo_actual'] ?? [];
+            $fechaDesde = $detalle['fecha_consumo_desde'] ?? null;
+            $fechaHasta = $detalle['fecha_consumo_hasta'] ?? null;
 
             $consumidoAnual  = $this->consumoHelper->obtenerConsumoAnual($anio, $fechaDesde, $fechaHasta);
             $disponibleAnual = $presupuesto['monto_anual'] - $consumidoAnual;
 
-            // 3. Calcular presupuesto mensual
             $presupuestoMensual = $this->presupuestoMensualHelper->calcular($presupuesto);
 
-            // 4. Mensaje contextual
             $mensajeContexto = MensajeContextualHelper::obtener($presupuesto);
 
-            // 5. Monto diario con restricción
-            $monto_diario_sistema = round($presupuesto['monto_diario'], 2);
-            $detalle = $presupuesto['detalle_periodo_actual'] ?? null;
+            // Monto diario calculado dinámicamente (nunca del DB — varía según el mes)
+            $diasMesActual        = (int) date('t');
+            $montoMensual         = (float) ($presupuesto['monto_mensual'] ?? 0);
+            $monto_diario_sistema = round($montoMensual / $diasMesActual, 2);
 
             if ($detalle && ($detalle['en_periodo_prueba'] ?? false)) {
-                $porcentaje = ($detalle['porcentaje_restriccion'] ?? 100) / 100;
-                $monto_diario_sistema = $monto_diario_sistema * $porcentaje;
+                $porcentaje           = ($detalle['porcentaje_restriccion'] ?? 100) / 100;
+                $monto_diario_sistema = round($monto_diario_sistema * $porcentaje, 2);
             }
 
-            // 6. Armar respuesta (MISMA ESTRUCTURA que antes)
             $response = [
                 'agencia'  => $presupuesto['agencia'],
                 'puesto'   => $presupuesto['puesto'],
@@ -4631,12 +4626,12 @@ final class combustibleApiClass extends ConexionBD
                 'contexto' => $mensajeContexto,
 
                 'presupuesto_anual' => [
-                    'total'           => round($presupuesto['monto_anual'], 2),
-                    'consumido'       => round($consumidoAnual, 2),
-                    'disponible'      => round($disponibleAnual, 2),
+                    'total'            => round($presupuesto['monto_anual'], 2),
+                    'consumido'        => round($consumidoAnual, 2),
+                    'disponible'       => round($disponibleAnual, 2),
                     'porcentaje_usado' => $presupuesto['monto_anual'] > 0
                         ? round(($consumidoAnual / $presupuesto['monto_anual']) * 100, 2)
-                        : 0
+                        : 0,
                 ],
 
                 'presupuesto_mensual' => [
@@ -4646,10 +4641,11 @@ final class combustibleApiClass extends ConexionBD
                     'disponible'         => $presupuestoMensual['disponible'],
                     'porcentaje_usado'   => $presupuestoMensual['presupuesto_calculado'] > 0
                         ? round(($presupuestoMensual['consumido'] / $presupuestoMensual['presupuesto_calculado']) * 100, 2)
-                        : 0
+                        : 0,
                 ],
 
-                'monto_diario' => $monto_diario_sistema
+                'monto_diario'  => $monto_diario_sistema,
+                'monto_mensual' => round($montoMensual, 2),
             ];
 
             if (isset($presupuesto['detalle_periodo_actual'])) {
@@ -4667,6 +4663,7 @@ final class combustibleApiClass extends ConexionBD
             return $this->res->fail('Error al obtener presupuesto disponible', $e);
         }
     }
+
 
     //? fin calculos de presupuestos.
 
@@ -5113,6 +5110,7 @@ final class combustibleApiClass extends ConexionBD
     public function crearLiquidacion($datos)
     {
         try {
+            return $this->res->info('Sistema Bloqueado no se permite nuevas liquidaciones ');
             $datos = $this->limpiarDatos($datos);
 
             // Validaciones básicas
@@ -5295,14 +5293,13 @@ final class combustibleApiClass extends ConexionBD
                 return $this->res->fail('El monto a liquidar es requerido y debe ser mayor a 0');
             }
 
-            // Obtener liquidación actual
-            $sql = "SELECT 
+            $sql = "SELECT
                 l.idLiquidaciones,
                 l.usuarioid,
                 l.numero_factura,
                 l.estado,
-                l.monto as monto_liquidar_actual,    -- monto actual a liquidar
-                l.monto_factura                       -- monto total factura
+                l.monto   AS monto_liquidar_actual,
+                l.monto_factura
             FROM apoyo_combustibles.liquidaciones l
             WHERE l.idLiquidaciones = ? AND l.usuarioid = ?";
 
@@ -5314,20 +5311,17 @@ final class combustibleApiClass extends ConexionBD
                 return $this->res->fail('La liquidación no existe o no tiene permisos para editarla');
             }
 
-            // Solo se puede editar si está en estado 'enviada' o 'devuelta'
             if (!in_array($liquidacion['estado'], ['enviada', 'devuelta', 'corregida'])) {
                 return $this->res->fail('Solo se pueden editar liquidaciones en estado "enviada", "devuelta" o "corregida"');
             }
 
-            // Validar que monto_liquidar no exceda monto_factura
             if ($datos->monto_liquidar > $liquidacion['monto_factura']) {
                 return $this->res->fail('El monto a liquidar no puede exceder el monto total de la factura');
             }
 
-            // Validar vehículo si se proporcionó
             if (!empty($datos->vehiculoid)) {
-                $sqlVehiculo = "SELECT COUNT(*) 
-                       FROM apoyo_combustibles.vehiculos 
+                $sqlVehiculo = "SELECT COUNT(*)
+                       FROM apoyo_combustibles.vehiculos
                        WHERE idVehiculos = ? AND usuarioid = ? AND activo = 1";
                 $stmt = $this->connect->prepare($sqlVehiculo);
                 $stmt->execute([$datos->vehiculoid, $this->idUsuario]);
@@ -5337,33 +5331,33 @@ final class combustibleApiClass extends ConexionBD
                 }
             }
 
-            // Validar presupuesto con el nuevo monto_liquidar
-            $validacionPresupuesto = $this->_validarPresupuestoDisponible(
-                $datos->monto_liquidar,
-                $datos->tipoapoyoid
-            );
+            // Solo validar la diferencia: el monto actual ya está comprometido en el presupuesto.
+            // Si el nuevo monto es menor o igual, no se consume presupuesto adicional.
+            $montoActual = (float) $liquidacion['monto_liquidar_actual'];
+            $diferencia  = $datos->monto_liquidar - $montoActual;
 
-            if (!$validacionPresupuesto['valido']) {
-                return $this->res->fail($validacionPresupuesto['mensaje']);
+            if ($diferencia > 0) {
+                $validacionPresupuesto = $this->_validarPresupuestoDisponible(
+                    $diferencia,
+                    $datos->tipoapoyoid
+                );
+                if (!$validacionPresupuesto['valido']) {
+                    return $this->res->fail($validacionPresupuesto['mensaje']);
+                }
             }
 
             $this->connect->beginTransaction();
 
-            if ($liquidacion['estado'] == 'devuelta') {
-                $estado_nuevo = 'corregida';
-            } else {
-                $estado_nuevo = $liquidacion['estado'];
-            }
+            $estado_nuevo = ($liquidacion['estado'] === 'devuelta') ? 'corregida' : $liquidacion['estado'];
 
-            // Actualizar: monto = monto_liquidar (NO tocar monto_factura)
-            $sql = "UPDATE apoyo_combustibles.liquidaciones 
-                SET vehiculoid = ?,
+            $sql = "UPDATE apoyo_combustibles.liquidaciones
+                SET vehiculoid  = ?,
                     tipoapoyoid = ?,
                     descripcion = ?,
-                    detalle = ?,
-                    monto = ?,
-                    estado = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    detalle     = ?,
+                    monto       = ?,
+                    estado      = ?,
+                    updated_at  = CURRENT_TIMESTAMP
                 WHERE idLiquidaciones = ?";
 
             $stmt = $this->connect->prepare($sql);
@@ -5372,9 +5366,9 @@ final class combustibleApiClass extends ConexionBD
                 $datos->tipoapoyoid,
                 $datos->descripcion,
                 $datos->detalle ?? null,
-                $datos->monto_liquidar,               // monto = monto a liquidar
+                $datos->monto_liquidar,
                 $estado_nuevo,
-                $datos->idLiquidaciones
+                $datos->idLiquidaciones,
             ]);
 
             $this->connect->commit();

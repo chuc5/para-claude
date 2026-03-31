@@ -7,87 +7,54 @@ use PDO;
 /**
  * PresupuestoRangoHelper - Cálculo de presupuesto en rangos arbitrarios
  *
- * Centraliza dos operaciones que son necesarias desde múltiples módulos:
- *
- * 1. calcularPorRango(): Calcula el presupuesto asignado dentro de un rango
- *    arbitrario de fechas, respetando el porcentaje reducido durante prueba.
- *
- * 2. obtenerPorAgenciaPuesto(): Consulta el presupuesto base vigente para
- *    una combinación agencia/puesto/año.
- *
- * CONSUMIDO POR:
- *   - MantenimientoLiquidacionesHelper (construcción de filas y períodos en curso)
- *   - Cualquier módulo futuro que necesite presupuesto proporcional por rango
- *
- * @package App\combustibleApi\Helpers
- * @author  Sistema de Combustibles
- * @version 1.0.0
+ * CAMBIO: Ahora usa tarifa mensual variable en lugar de tarifa diaria fija.
+ * Formula: tarifa_diaria(mes) = monto_mensual / días_del_mes
+ * Esto respeta la variación de días entre meses (28, 29, 30, 31).
  */
 class PresupuestoRangoHelper
 {
-    /** @var PDO Conexión a base de datos */
     private $connect;
 
-    /**
-     * @param PDO $connect Conexión PDO activa (viene del controller)
-     */
     public function __construct(PDO $connect)
     {
         $this->connect = $connect;
     }
 
-    // ════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
     // CÁLCULO POR RANGO
-    // ════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
 
     /**
      * Calcula el presupuesto asignado dentro de un rango arbitrario de fechas.
+     * Respeta el porcentaje reducido durante período de prueba.
      *
-     * Respeta el porcentaje reducido durante el período de prueba.
-     * Optimiza el cálculo separando los días en prueba y post-prueba
-     * con aritmética de fechas (sin iterar día a día).
-     *
-     * CASOS MANEJADOS:
-     * ┌────────────────────────────┬─────────────────────────────────────┐
-     * │ Escenario                  │ Resultado                           │
-     * ├────────────────────────────┼─────────────────────────────────────┤
-     * │ Sin restricción de prueba  │ días × monto_diario                 │
-     * │ Todo el rango en prueba    │ días × monto_diario × porcentaje    │
-     * │ Todo el rango post-prueba  │ días × monto_diario                 │
-     * │ Rango cruza frontera       │ (días_prueba × % ) + días_normal    │
-     * └────────────────────────────┴─────────────────────────────────────┘
-     *
-     * @param array  $periodo     Período mapeado con las claves:
-     *   - monto_diario           (float)  Monto diario del puesto
-     *   - es_nuevo               (bool)   Si tiene restricción de prueba
-     *   - porcentaje_presupuesto (int)    Porcentaje durante prueba (ej: 50)
-     *   - dias_presupuesto       (int)    Días totales de restricción
-     *   - inicio_efectivo        (string) Fecha inicio real del UCF (Y-m-d)
-     * @param string $inicioRango Inicio del rango a calcular (Y-m-d)
-     * @param string $finRango    Fin del rango a calcular (Y-m-d)
-     * @return float Presupuesto total asignado en el rango
+     * @param array  $periodo     Debe incluir: monto_mensual, es_nuevo,
+     *                            porcentaje_presupuesto, dias_presupuesto,
+     *                            inicio_efectivo
+     * @param string $inicioRango Y-m-d
+     * @param string $finRango    Y-m-d
+     * @return float
      */
     public function calcularPorRango(
         array  $periodo,
         string $inicioRango,
         string $finRango
     ): float {
-        $presupuestoDiario = (float) ($periodo['monto_diario'] ?? 0);
+        $montoMensual = (float) ($periodo['monto_mensual'] ?? 0);
 
-        if ($presupuestoDiario <= 0) {
-            return 0.0;
-        }
+        if ($montoMensual <= 0) return 0.0;
 
-        $dtInicio  = new \DateTime($inicioRango);
-        $dtFin     = new \DateTime($finRango);
-        $totalDias = $dtInicio->diff($dtFin)->days + 1;
+        $dtInicio = new \DateTime($inicioRango);
+        $dtFin    = new \DateTime($finRango);
 
-        // ── Sin restricción → cálculo directo ─────────────────────────
+        if ($dtInicio > $dtFin) return 0.0;
+
+        // Sin restricción de prueba
         if (!($periodo['es_nuevo'] ?? false) || ($periodo['dias_presupuesto'] ?? 0) <= 0) {
-            return $presupuestoDiario * $totalDias;
+            return $this->calcularRangoMensual($inicioRango, $finRango, $montoMensual);
         }
 
-        // ── Con restricción → separar días prueba / post-prueba ───────
+        // Con restricción: calcular fecha fin de prueba
         $fechaFinPrueba = (new \DateTime($periodo['inicio_efectivo']))
             ->modify("+{$periodo['dias_presupuesto']} days")
             ->modify('-1 day');
@@ -96,42 +63,91 @@ class PresupuestoRangoHelper
 
         // Todo el rango cae en prueba
         if ($dtFin <= $fechaFinPrueba) {
-            return $presupuestoDiario * $totalDias * $porcentaje;
+            return $this->calcularRangoMensual($inicioRango, $finRango, $montoMensual, $porcentaje);
         }
 
         // Todo el rango cae después de prueba
         if ($dtInicio > $fechaFinPrueba) {
-            return $presupuestoDiario * $totalDias;
+            return $this->calcularRangoMensual($inicioRango, $finRango, $montoMensual);
         }
 
-        // ── El rango cruza la frontera prueba/post-prueba ─────────────
-        $diasEnPrueba   = $dtInicio->diff($fechaFinPrueba)->days + 1;
-        $diasPostPrueba = $totalDias - $diasEnPrueba;
+        // El rango cruza la frontera prueba/post-prueba
+        $strFinPrueba  = $fechaFinPrueba->format('Y-m-d');
+        $strPostPrueba = (clone $fechaFinPrueba)->modify('+1 day')->format('Y-m-d');
 
-        $presupuestoPrueba = $presupuestoDiario * $diasEnPrueba * $porcentaje;
-        $presupuestoNormal = $presupuestoDiario * $diasPostPrueba;
-
-        return $presupuestoPrueba + $presupuestoNormal;
+        return $this->calcularRangoMensual($inicioRango, $strFinPrueba, $montoMensual, $porcentaje)
+            + $this->calcularRangoMensual($strPostPrueba, $finRango, $montoMensual);
     }
 
-    // ════════════════════════════════════════════════════════════════════
+    /**
+     * Calcula el presupuesto para un rango usando tarifa mensual variable.
+     * Para cada mes del rango: tarifa = monto_mensual / días_del_mes.
+     *
+     * @param string $fechaInicio Y-m-d
+     * @param string $fechaFin    Y-m-d
+     * @param float  $montoMensual
+     * @param float  $porcentaje  Factor (0.0–1.0), default 1.0
+     * @return float
+     */
+    public function calcularRangoMensual(
+        string $fechaInicio,
+        string $fechaFin,
+        float  $montoMensual,
+        float  $porcentaje = 1.0
+    ): float {
+        if ($montoMensual <= 0 || $porcentaje <= 0) return 0.0;
+
+        $inicio = new \DateTime($fechaInicio);
+        $fin    = new \DateTime($fechaFin);
+
+        if ($inicio > $fin) return 0.0;
+
+        $total  = 0.0;
+        // Posicionarse en el 1er día del mes de inicio
+        $cursor = new \DateTime($inicio->format('Y-m-01'));
+
+        while ($cursor <= $fin) {
+            $diasDelMes   = (int) $cursor->format('t');
+            $tarifaDiaria = $montoMensual / $diasDelMes;
+
+            // Inicio efectivo en este mes
+            $iniEf = ($cursor < $inicio) ? clone $inicio : clone $cursor;
+
+            // Fin del mes actual
+            $finMes = new \DateTime($cursor->format('Y-m-') . str_pad($diasDelMes, 2, '0', STR_PAD_LEFT));
+
+            // Fin efectivo en este mes
+            $finEf = ($finMes < $fin) ? clone $finMes : clone $fin;
+
+            $dias = (int) $iniEf->diff($finEf)->days + 1;
+
+            if ($dias > 0) {
+                $total += $tarifaDiaria * $dias * $porcentaje;
+            }
+
+            // Avanzar al primer día del mes siguiente
+            $cursor->modify('+1 month');
+        }
+
+        return $total;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // CONSULTA DE PRESUPUESTO BASE
-    // ════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════
 
     /**
-     * Obtiene el presupuesto vigente para una combinación agencia/puesto/año.
+     * Obtiene el presupuesto vigente para agencia/puesto/año.
+     * Retorna monto_mensual, monto_anual y monto_diario.
      *
-     * @param int $agenciaid ID de la agencia
-     * @param int $puestoid  ID del puesto
-     * @param int $anio      Año a consultar
-     * @return array|null ['monto_anual', 'monto_diario'] o null si no existe
+     * @param int $agenciaid
+     * @param int $puestoid
+     * @param int $anio
+     * @return array|null
      */
-    public function obtenerPorAgenciaPuesto(
-        int $agenciaid,
-        int $puestoid,
-        int $anio
-    ): ?array {
-        $sql = "SELECT monto_anual, monto_diario
+    public function obtenerPorAgenciaPuesto(int $agenciaid, int $puestoid, int $anio): ?array
+    {
+        $sql = "SELECT monto_mensual, monto_anual, monto_diario
                 FROM apoyo_combustibles.presupuestogeneral
                 WHERE agenciaid = ?
                   AND puestoid  = ?

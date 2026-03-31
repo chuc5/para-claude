@@ -8,56 +8,61 @@ use PDO;
 /**
  * ConsumoHelper - Consultas de consumo de presupuesto
  *
- * Centraliza las consultas SQL de consumo anual y mensual
- * evitando duplicación de queries en el controller.
- *
- * @package App\combustibleApi\Helpers
- * @author  Sistema de Combustibles
- * @version 1.0.0
+ * CAMBIO: El consumo ahora incluye liquidaciones sin comprobante asignado
+ * (comprobantecontableid IS NULL) para capturar liquidaciones de fin de mes
+ * que aún no han sido procesadas contablemente.
  */
 class ConsumoHelper
 {
-    /** @var PDO Conexión a base de datos */
     private $connect;
-
-    /** @var int ID del usuario actual */
     private $idUsuario;
 
-    /**
-     * @param PDO $connect   Conexión PDO activa (viene del controller)
-     * @param int $idUsuario ID del usuario
-     */
     public function __construct(PDO $connect, $idUsuario)
     {
-        $this->connect = $connect;
+        $this->connect   = $connect;
         $this->idUsuario = $idUsuario;
     }
 
     /**
-     * Obtiene el total consumido en el año por el usuario
+     * Obtiene el total consumido en el año por el usuario.
      *
-     * Suma los montos de liquidaciones activas (excluye eliminadas y rechazadas)
+     * Lógica de inclusión:
+     * - Si se pasa rango de fechas: cuenta las del rango MÁS las que no tienen
+     *   comprobante asignado en el año (pendientes de pago).
+     * - Si no se pasa rango: cuenta todas las del año.
      *
-     * @param int $anio Año a consultar
-     * @return float Monto total consumido en el año
+     * @param int         $anio
+     * @param string|null $fechaDesde
+     * @param string|null $fechaHasta
+     * @return float
      */
     public function obtenerConsumoAnual($anio, $fechaDesde = null, $fechaHasta = null)
     {
         try {
             if ($fechaDesde && $fechaHasta) {
+                // Cuenta las del período definido + las sin comprobante del año
+                // (OR evita doble conteo: una liquidación del rango sin comprobante
+                // satisface ambas condiciones pero se suma una sola vez)
                 $sql = "SELECT COALESCE(SUM(monto), 0)
-                    FROM apoyo_combustibles.liquidaciones
-                    WHERE usuarioid = ?
-                        AND fecha_liquidacion BETWEEN ? AND ?
-                        AND estado NOT IN ('eliminada', 'rechazada')";
+                        FROM apoyo_combustibles.liquidaciones
+                        WHERE usuarioid = ?
+                            AND estado NOT IN ('eliminada', 'rechazada')
+                            AND (
+                                fecha_liquidacion BETWEEN ? AND ?
+                                OR (
+                                    comprobantecontableid IS NULL
+                                    AND YEAR(fecha_liquidacion) = ?
+                                )
+                            )";
                 $stmt = $this->connect->prepare($sql);
-                $stmt->execute([$this->idUsuario, $fechaDesde, $fechaHasta]);
+                $stmt->execute([$this->idUsuario, $fechaDesde, $fechaHasta, $anio]);
             } else {
+                // Sin rango: todo el año (ya incluye sin comprobante)
                 $sql = "SELECT COALESCE(SUM(monto), 0)
-                    FROM apoyo_combustibles.liquidaciones
-                    WHERE usuarioid = ?
-                        AND YEAR(fecha_liquidacion) = ?
-                        AND estado NOT IN ('eliminada', 'rechazada')";
+                        FROM apoyo_combustibles.liquidaciones
+                        WHERE usuarioid = ?
+                            AND YEAR(fecha_liquidacion) = ?
+                            AND estado NOT IN ('eliminada', 'rechazada')";
                 $stmt = $this->connect->prepare($sql);
                 $stmt->execute([$this->idUsuario, $anio]);
             }
@@ -71,24 +76,36 @@ class ConsumoHelper
     }
 
     /**
-     * Obtiene el total consumido en el mes actual por el usuario
+     * Obtiene el total consumido en el mes actual por el usuario.
      *
-     * Solo cuenta liquidaciones cuyo tipo de apoyo aplica límite mensual.
+     * Incluye:
+     * - Liquidaciones del mes actual (con o sin comprobante)
+     * - Liquidaciones sin comprobante de cualquier mes del año actual
+     *   (para capturar las de fin de mes previo aún sin procesar)
+     * Solo para tipos de apoyo con aplica_limite_mensual = 1.
      *
-     * @return float Monto total consumido en el mes
+     * @return float
      */
     public function obtenerConsumoMensual()
     {
         try {
-            $sql = "SELECT COALESCE(SUM(l.monto), 0) as consumido
+            $sql = "SELECT COALESCE(SUM(l.monto), 0) AS consumido
                     FROM apoyo_combustibles.liquidaciones l
                     INNER JOIN apoyo_combustibles.tiposapoyo ta
                         ON l.tipoapoyoid = ta.idTiposApoyo
                     WHERE l.usuarioid = ?
-                        AND YEAR(l.fecha_liquidacion) = YEAR(CURRENT_DATE)
-                        AND MONTH(l.fecha_liquidacion) = MONTH(CURRENT_DATE)
                         AND l.estado NOT IN ('eliminada', 'rechazada')
-                        AND ta.aplica_limite_mensual = 1";
+                        AND ta.aplica_limite_mensual = 1
+                        AND (
+                            (
+                                YEAR(l.fecha_liquidacion)  = YEAR(CURRENT_DATE)
+                                AND MONTH(l.fecha_liquidacion) = MONTH(CURRENT_DATE)
+                            )
+                            OR (
+                                l.comprobantecontableid IS NULL
+                                AND YEAR(l.fecha_liquidacion) = YEAR(CURRENT_DATE)
+                            )
+                        )";
 
             $stmt = $this->connect->prepare($sql);
             $stmt->execute([$this->idUsuario]);
@@ -102,10 +119,10 @@ class ConsumoHelper
     }
 
     /**
-     * Verifica si un tipo de apoyo aplica límite mensual
+     * Verifica si un tipo de apoyo aplica límite mensual.
      *
-     * @param int $tipoapoyoid ID del tipo de apoyo
-     * @return bool True si aplica límite mensual
+     * @param int $tipoapoyoid
+     * @return bool
      */
     public function aplicaLimiteMensual($tipoapoyoid)
     {
