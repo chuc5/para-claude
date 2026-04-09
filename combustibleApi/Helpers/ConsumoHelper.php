@@ -1,17 +1,9 @@
 <?php
-
 namespace App\combustibleApi\Helpers;
 
 use Exception;
 use PDO;
 
-/**
- * ConsumoHelper - Consultas de consumo de presupuesto
- *
- * CAMBIO: El consumo ahora incluye liquidaciones sin comprobante asignado
- * (comprobantecontableid IS NULL) para capturar liquidaciones de fin de mes
- * que aún no han sido procesadas contablemente.
- */
 class ConsumoHelper
 {
     private $connect;
@@ -23,122 +15,211 @@ class ConsumoHelper
         $this->idUsuario = $idUsuario;
     }
 
+    // =========================================================================
+    // RANGO DEL PERÍODO DE CONSUMO
+    // =========================================================================
+
     /**
-     * Obtiene el total consumido en el año por el usuario.
+     * Retorna el rango del período de consumo mensual:
+     * - Desde: fecha_ingreso del UCF activo
+     * - Hasta: created_at del último comprobante de tipo 'liquidacion'
+     *          (null si no existe ninguno)
      *
-     * Lógica de inclusión:
-     * - Si se pasa rango de fechas: cuenta las del rango MÁS las que no tienen
-     *   comprobante asignado en el año (pendientes de pago).
-     * - Si no se pasa rango: cuenta todas las del año.
-     *
-     * @param int         $anio
-     * @param string|null $fechaDesde
-     * @param string|null $fechaHasta
-     * @return float
+     * @return array ['desde' => string|null, 'hasta' => string|null]
      */
-    public function obtenerConsumoAnual($anio, $fechaDesde = null, $fechaHasta = null)
+    public function obtenerRangoPeriodoConsumo(): array
     {
         try {
-            if ($fechaDesde && $fechaHasta) {
-                // Cuenta las del período definido + las sin comprobante del año
-                // (OR evita doble conteo: una liquidación del rango sin comprobante
-                // satisface ambas condiciones pero se suma una sola vez)
-                $sql = "SELECT COALESCE(SUM(monto), 0)
-                        FROM apoyo_combustibles.liquidaciones
-                        WHERE usuarioid = ?
-                            AND estado NOT IN ('eliminada', 'rechazada')
-                            AND (
-                                fecha_liquidacion BETWEEN ? AND ?
-                                OR (
-                                    comprobantecontableid IS NULL
-                                    AND YEAR(fecha_liquidacion) = ?
-                                )
-                            )";
-                $stmt = $this->connect->prepare($sql);
-                $stmt->execute([$this->idUsuario, $fechaDesde, $fechaHasta, $anio]);
-            } else {
-                // Sin rango: todo el año (ya incluye sin comprobante)
-                $sql = "SELECT COALESCE(SUM(monto), 0)
-                        FROM apoyo_combustibles.liquidaciones
-                        WHERE usuarioid = ?
-                            AND YEAR(fecha_liquidacion) = ?
-                            AND estado NOT IN ('eliminada', 'rechazada')";
-                $stmt = $this->connect->prepare($sql);
-                $stmt->execute([$this->idUsuario, $anio]);
-            }
+            // Inicio: created_at del último comprobante registrado
+            // Si no existe ninguno, inicio de año
+            $sqlDesde = "SELECT MAX(created_at)
+                     FROM apoyo_combustibles.comprobantescontables
+                     WHERE tipo = 'liquidacion'";
+            $stmt = $this->connect->prepare($sqlDesde);
+            $stmt->execute();
+            $desde = $stmt->fetchColumn() ?: date('Y') . '-01-01';
 
-            return (float) $stmt->fetchColumn();
+            // Fin: sin límite superior (cuenta hasta hoy)
+            // El siguiente comprobante aún no existe, por eso el usuario
+            // está consumiendo en este período abierto
+            return [
+                'desde' => $desde,
+                'hasta' => null,
+            ];
 
         } catch (Exception $e) {
-            error_log("Error en ConsumoHelper::obtenerConsumoAnual: " . $e->getMessage());
-            return 0;
+            error_log("Error en ConsumoHelper::obtenerRangoPeriodoConsumo: " . $e->getMessage());
+            return ['desde' => date('Y') . '-01-01', 'hasta' => null];
         }
     }
 
-    /**
-     * Obtiene el total consumido en el mes actual por el usuario.
-     *
-     * Incluye:
-     * - Liquidaciones del mes actual (con o sin comprobante)
-     * - Liquidaciones sin comprobante de cualquier mes del año actual
-     *   (para capturar las de fin de mes previo aún sin procesar)
-     * Solo para tipos de apoyo con aplica_limite_mensual = 1.
-     *
-     * @return float
-     */
-    public function obtenerConsumoMensual()
+    // =========================================================================
+    // CONSUMO MENSUAL
+    // Rango: desde fecha_ingreso del UCF activo
+    //        hasta created_at del último comprobante (o ahora si no hay)
+    // Solo tipos de apoyo con aplica_limite_mensual = 1
+    // =========================================================================
+
+    public function obtenerConsumoMensual(): float
     {
         try {
-            $sql = "SELECT COALESCE(SUM(l.monto), 0) AS consumido
-                    FROM apoyo_combustibles.liquidaciones l
-                    INNER JOIN apoyo_combustibles.tiposapoyo ta
-                        ON l.tipoapoyoid = ta.idTiposApoyo
-                    WHERE l.usuarioid = ?
-                        AND l.estado NOT IN ('eliminada', 'rechazada')
-                        AND ta.aplica_limite_mensual = 1
-                        AND (
-                            (
-                                YEAR(l.fecha_liquidacion)  = YEAR(CURRENT_DATE)
-                                AND MONTH(l.fecha_liquidacion) = MONTH(CURRENT_DATE)
-                            )
-                            OR (
-                                l.comprobantecontableid IS NULL
-                                AND YEAR(l.fecha_liquidacion) = YEAR(CURRENT_DATE)
-                            )
-                        )";
+            $rango = $this->obtenerRangoPeriodoConsumo();
+            if (!$rango['desde']) return 0.0;
+
+            $params = [$this->idUsuario, $rango['desde']];
+            $condHasta = '';
+
+            if ($rango['hasta']) {
+                $condHasta = 'AND l.fecha_liquidacion <= ?';
+                $params[]  = $rango['hasta'];
+            }
+            // Si no hay comprobante posterior al UCF, cuenta todo desde el ingreso hasta hoy
+
+            $sql = "SELECT COALESCE(SUM(l.monto), 0)
+                FROM apoyo_combustibles.liquidaciones l
+                INNER JOIN apoyo_combustibles.tiposapoyo ta
+                    ON l.tipoapoyoid = ta.idTiposApoyo
+                WHERE l.usuarioid = ?
+                  AND l.estado NOT IN ('eliminada', 'rechazada')
+                  AND ta.aplica_limite_mensual = 1
+                  AND l.fecha_liquidacion >= ?
+                  {$condHasta}";
 
             $stmt = $this->connect->prepare($sql);
-            $stmt->execute([$this->idUsuario]);
-
+            $stmt->execute($params);
             return (float) $stmt->fetchColumn();
 
         } catch (Exception $e) {
             error_log("Error en ConsumoHelper::obtenerConsumoMensual: " . $e->getMessage());
-            return 0;
+            return 0.0;
         }
     }
 
-    /**
-     * Verifica si un tipo de apoyo aplica límite mensual.
-     *
-     * @param int $tipoapoyoid
-     * @return bool
-     */
-    public function aplicaLimiteMensual($tipoapoyoid)
+    // =========================================================================
+    // CONSUMO ANUAL
+    // - En período de prueba: solo suma lo liquidado dentro de ese período
+    // - Post-prueba / normal: suma TODOS los períodos activos del año
+    // =========================================================================
+    public function obtenerConsumoAnual(
+        int     $anio,
+        ?string $fechaDesde = null,
+        ?string $fechaHasta = null
+    ): float {
+        try {
+            $infoPrueba = $this->_obtenerInfoPeriodoPrueba($anio);
+
+            if ($infoPrueba['en_prueba']) {
+                // Solo el tramo de prueba (liquidaciones + extraordinarios del UCF)
+                $sql = "SELECT COALESCE(SUM(monto), 0)
+                    FROM apoyo_combustibles.liquidaciones
+                    WHERE usuarioid = ?
+                      AND estado NOT IN ('eliminada', 'rechazada')
+                      AND fecha_liquidacion BETWEEN ? AND ?";
+                $stmt = $this->connect->prepare($sql);
+                $stmt->execute([
+                    $this->idUsuario,
+                    $infoPrueba['fecha_inicio'],
+                    $infoPrueba['fecha_fin_prueba'] . ' 23:59:59',
+                ]);
+                $consumoLiquidaciones = (float) $stmt->fetchColumn();
+
+                // Extraordinarios del período de prueba activo
+                $sqlExtra = "SELECT COALESCE(SUM(re.monto), 0)
+                         FROM apoyo_combustibles.registros_extraordinarios re
+                         INNER JOIN apoyo_combustibles.usuarioscontrolfechas ucf
+                             ON re.ucfid = ucf.idUsuariosControlFechas
+                         WHERE re.usuarioid = ?
+                           AND re.activo    = 1
+                           AND re.estado   != 'cancelado'
+                           AND ucf.fecha_ingreso = ?";
+                $stmt = $this->connect->prepare($sqlExtra);
+                $stmt->execute([$this->idUsuario, $infoPrueba['fecha_inicio']]);
+                $consumoExtra = (float) $stmt->fetchColumn();
+
+                return $consumoLiquidaciones + $consumoExtra;
+
+            } else {
+                // Todo el año: liquidaciones + todos los extraordinarios no cancelados
+                $sql = "SELECT COALESCE(SUM(monto), 0)
+                    FROM apoyo_combustibles.liquidaciones
+                    WHERE usuarioid = ?
+                      AND estado NOT IN ('eliminada', 'rechazada')
+                      AND YEAR(fecha_liquidacion) = ?";
+                $stmt = $this->connect->prepare($sql);
+                $stmt->execute([$this->idUsuario, $anio]);
+                $consumoLiquidaciones = (float) $stmt->fetchColumn();
+
+                $sqlExtra = "SELECT COALESCE(SUM(monto), 0)
+                         FROM apoyo_combustibles.registros_extraordinarios
+                         WHERE usuarioid = ?
+                           AND activo    = 1
+                           AND estado   != 'cancelado'
+                           AND YEAR(created_at) = ?";
+                $stmt = $this->connect->prepare($sqlExtra);
+                $stmt->execute([$this->idUsuario, $anio]);
+                $consumoExtra = (float) $stmt->fetchColumn();
+
+                return $consumoLiquidaciones + $consumoExtra;
+            }
+
+        } catch (Exception $e) {
+            error_log("Error en ConsumoHelper::obtenerConsumoAnual: " . $e->getMessage());
+            return 0.0;
+        }
+    }
+
+    // =========================================================================
+    // HELPERS PARA LÍMITE MENSUAL Y PERÍODO DE PRUEBA
+    // =========================================================================
+
+    public function aplicaLimiteMensual($tipoapoyoid): bool
     {
         try {
-            $sql = "SELECT aplica_limite_mensual
-                    FROM apoyo_combustibles.tiposapoyo
-                    WHERE idTiposApoyo = ?";
-
+            $sql  = "SELECT aplica_limite_mensual
+                     FROM apoyo_combustibles.tiposapoyo
+                     WHERE idTiposApoyo = ?";
             $stmt = $this->connect->prepare($sql);
             $stmt->execute([$tipoapoyoid]);
-
             return (bool) $stmt->fetchColumn();
-
         } catch (Exception $e) {
             error_log("Error en ConsumoHelper::aplicaLimiteMensual: " . $e->getMessage());
             return false;
         }
+    }
+
+    /**
+     * Detecta si el usuario está actualmente en período de prueba
+     * y devuelve sus fechas delimitadoras.
+     */
+    private function _obtenerInfoPeriodoPrueba(int $anio): array
+    {
+        $hoy = date('Y-m-d');
+
+        $sql = "SELECT fecha_ingreso, dias_presupuesto, es_nuevo
+                FROM apoyo_combustibles.usuarioscontrolfechas
+                WHERE usuarioid = ?
+                  AND activo    = 1
+                  AND YEAR(fecha_ingreso) = ?
+                ORDER BY fecha_ingreso DESC
+                LIMIT 1";
+
+        $stmt = $this->connect->prepare($sql);
+        $stmt->execute([$this->idUsuario, $anio]);
+        $ucf  = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$ucf || !$ucf['es_nuevo'] || (int) $ucf['dias_presupuesto'] <= 0) {
+            return ['en_prueba' => false];
+        }
+
+        $fechaFinPrueba = (new \DateTime($ucf['fecha_ingreso']))
+            ->modify("+{$ucf['dias_presupuesto']} days")
+            ->modify('-1 day')
+            ->format('Y-m-d');
+
+        return [
+            'en_prueba'        => $hoy <= $fechaFinPrueba,
+            'fecha_inicio'     => $ucf['fecha_ingreso'],
+            'fecha_fin_prueba' => $fechaFinPrueba,
+        ];
     }
 }

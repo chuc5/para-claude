@@ -120,7 +120,10 @@ final class combustibleApiClass extends ConexionBD
         //? Envio para autorizacion
         'obtenerAniosDisponiblesLiquidaciones',
         'listarEnvioPagoLiquidaciones',
-        'obtenerDetalleEnvioPago'
+        'obtenerDetalleEnvioPago',
+        //? extraordinarios
+        'listarRegistrosExtraordinarios',
+        'obtenerResumenPruebaPorUsuario',
 
     ];
 
@@ -199,6 +202,10 @@ final class combustibleApiClass extends ConexionBD
         //? Mantenimiento liquidaciones
         'actualizarLiquidacionMantenimiento',
         'obtenerDetalleMantenimientoPorPeriodo',
+        //? extraordinarios
+        'crearRegistroExtraordinario',
+        'editarRegistroExtraordinario',
+        'cancelarRegistroExtraordinario',
 
     ];
 
@@ -8455,5 +8462,409 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         }
     }
 
+// ============================================================================
+// REGISTROS EXTRAORDINARIOS (complementos de período de prueba)
+// ============================================================================
 
+    /**
+     * Retorna todos los registros extraordinarios con datos del usuario y UCF.
+     *
+     * GET: combustible/listarRegistrosExtraordinarios
+     */
+    public function listarRegistrosExtraordinarios()
+    {
+        try {
+            $sql = "SELECT
+                    re.idRegistroExtraordinario,
+                    re.usuarioid,
+                    re.ucfid,
+                    re.monto,
+                    re.descripcion,
+                    re.tipo,
+                    re.estado,
+                    re.comprobantecontableid,
+                    re.created_at,
+                    re.updated_at,
+                    dtp.nombres         AS nombre_usuario,
+                    ag.nombre           AS agencia,
+                    pu.nombre           AS puesto,
+                    ucf.fecha_ingreso,
+                    ucf.fecha_egreso,
+                    ucf.dias_presupuesto,
+                    cc.numero_comprobante,
+                    dtp_reg.nombres     AS registrado_por
+                FROM apoyo_combustibles.registros_extraordinarios re
+                INNER JOIN dbintranet.usuarios us
+                    ON re.usuarioid = us.idUsuarios
+                INNER JOIN dbintranet.datospersonales dtp
+                    ON us.idDatosPersonales = dtp.idDatosPersonales
+                INNER JOIN dbintranet.agencia ag
+                    ON us.idAgencia = ag.idAgencia
+                INNER JOIN dbintranet.puesto pu
+                    ON us.idPuesto = pu.idPuesto
+                INNER JOIN apoyo_combustibles.usuarioscontrolfechas ucf
+                    ON re.ucfid = ucf.idUsuariosControlFechas
+                LEFT JOIN apoyo_combustibles.comprobantescontables cc
+                    ON re.comprobantecontableid = cc.idComprobantesContables
+                LEFT JOIN dbintranet.usuarios us_reg
+                    ON re.registrado_por = us_reg.idUsuarios
+                LEFT JOIN dbintranet.datospersonales dtp_reg
+                    ON us_reg.idDatosPersonales = dtp_reg.idDatosPersonales
+                WHERE re.activo = 1
+                ORDER BY re.created_at DESC";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute();
+            $registros = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return $this->res->ok('Registros extraordinarios obtenidos', [
+                'registros' => $registros,
+                'total'     => count($registros),
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en listarRegistrosExtraordinarios: " . $e->getMessage());
+            return $this->res->fail('Error al listar registros extraordinarios', $e);
+        }
+    }
+
+// ----------------------------------------------------------------------------
+
+    /**
+     * Calcula el resumen del período de prueba de un usuario:
+     * presupuesto asignado, consumo real y diferencia pendiente.
+     * Contabilidad usa esto para saber qué monto extraordinario registrar.
+     *
+     * GET: combustible/obtenerResumenPruebaPorUsuario?usuarioid=XXX
+     */
+    public function obtenerResumenPruebaPorUsuario()
+    {
+        try {
+            $usuarioid = $_GET['usuarioid'] ?? null;
+            if (empty($usuarioid)) {
+                return $this->res->fail('El ID de usuario es requerido');
+            }
+
+            $anio = (int) date('Y');
+
+            // UCF del período de prueba
+            $sql = "SELECT
+                    ucf.idUsuariosControlFechas,
+                    ucf.fecha_ingreso,
+                    ucf.fecha_egreso,
+                    ucf.dias_presupuesto,
+                    ucf.porcentaje_presupuesto,
+                    ucf.es_nuevo,
+                    pg.monto_mensual,
+                    pg.monto_diario,
+                    ag.nombre AS agencia,
+                    pu.nombre AS puesto
+                FROM apoyo_combustibles.usuarioscontrolfechas ucf
+                LEFT JOIN apoyo_combustibles.presupuestogeneral pg
+                    ON  pg.agenciaid = ucf.agenciaid
+                    AND pg.puestoid  = ucf.puestoid
+                    AND pg.anio      = ?
+                    AND pg.activo    = 1
+                INNER JOIN dbintranet.agencia ag ON ag.idAgencia = ucf.agenciaid
+                INNER JOIN dbintranet.puesto  pu ON pu.idPuesto  = ucf.puestoid
+                WHERE ucf.usuarioid        = ?
+                  AND ucf.activo           = 1
+                  AND ucf.es_nuevo         = 1
+                  AND ucf.dias_presupuesto > 0
+                ORDER BY ucf.fecha_ingreso DESC
+                LIMIT 1";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio, $usuarioid]);
+            $ucf = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$ucf) {
+                return $this->res->info('El usuario no tiene período de prueba registrado');
+            }
+
+            // Calcular fechas del período de prueba
+            $fechaInicio    = $ucf['fecha_ingreso'];
+            $fechaFinPrueba = (new \DateTime($fechaInicio))
+                ->modify("+{$ucf['dias_presupuesto']} days")
+                ->modify('-1 day')
+                ->format('Y-m-d');
+
+            // Presupuesto asignado al período de prueba
+            $porcentaje       = $ucf['porcentaje_presupuesto'] / 100;
+            $montoMensual     = (float) $ucf['monto_mensual'];
+            $presupuestoAsignado = $this->_calcularPresupuestoPruebaRangoMensual(
+                $fechaInicio, $fechaFinPrueba, $montoMensual, $porcentaje
+            );
+
+            // Consumo real del período de prueba
+            $sqlConsumo = "SELECT COALESCE(SUM(monto), 0)
+                       FROM apoyo_combustibles.liquidaciones
+                       WHERE usuarioid = ?
+                         AND estado NOT IN ('eliminada', 'rechazada')
+                         AND fecha_liquidacion BETWEEN ? AND ?";
+            $stmt = $this->connect->prepare($sqlConsumo);
+            $stmt->execute([$usuarioid, $fechaInicio, $fechaFinPrueba . ' 23:59:59']);
+            $consumoReal = (float) $stmt->fetchColumn();
+
+            // Registros extraordinarios ya registrados para este UCF
+            $sqlExtra = "SELECT COALESCE(SUM(monto), 0)
+                     FROM apoyo_combustibles.registros_extraordinarios
+                     WHERE usuarioid = ?
+                       AND ucfid     = ?
+                       AND activo    = 1
+                       AND estado   != 'cancelado'";
+            $stmt = $this->connect->prepare($sqlExtra);
+            $stmt->execute([$usuarioid, $ucf['idUsuariosControlFechas']]);
+            $yaRegistrado = (float) $stmt->fetchColumn();
+
+            $diferencia       = max(0, $presupuestoAsignado - $consumoReal);
+            $pendienteRegistrar = max(0, $diferencia - $yaRegistrado);
+
+            return $this->res->ok('Resumen de período de prueba obtenido', [
+                'ucfid'                => (int) $ucf['idUsuariosControlFechas'],
+                'agencia'              => $ucf['agencia'],
+                'puesto'               => $ucf['puesto'],
+                'fecha_inicio_prueba'  => $fechaInicio,
+                'fecha_fin_prueba'     => $fechaFinPrueba,
+                'dias_prueba'          => (int) $ucf['dias_presupuesto'],
+                'porcentaje'           => (int) $ucf['porcentaje_presupuesto'],
+                'presupuesto_asignado' => round($presupuestoAsignado, 2),
+                'consumo_real'         => round($consumoReal, 2),
+                'diferencia'           => round($diferencia, 2),
+                'ya_registrado'        => round($yaRegistrado, 2),
+                'pendiente_registrar'  => round($pendienteRegistrar, 2),
+                'requiere_complemento' => $pendienteRegistrar > 0,
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en obtenerResumenPruebaPorUsuario: " . $e->getMessage());
+            return $this->res->fail('Error al obtener resumen del período de prueba', $e);
+        }
+    }
+
+// ----------------------------------------------------------------------------
+
+    /**
+     * Crea un registro extraordinario (complemento de período de prueba).
+     *
+     * POST: combustible/crearRegistroExtraordinario
+     *
+     * @param object $datos {
+     *   usuarioid   : string,
+     *   ucfid       : int,
+     *   monto       : float,
+     *   descripcion : string,
+     *   tipo?       : string  (default 'complemento_prueba')
+     * }
+     */
+    public function crearRegistroExtraordinario($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->usuarioid))   return $this->res->fail('El ID de usuario es requerido');
+            if (empty($datos->ucfid))       return $this->res->fail('El UCF es requerido');
+            if (empty($datos->descripcion)) return $this->res->fail('La descripción es requerida');
+            if (!isset($datos->monto) || (float) $datos->monto <= 0) {
+                return $this->res->fail('El monto debe ser mayor a 0');
+            }
+
+            // Verificar que el UCF pertenece al usuario y es de tipo prueba
+            $sql = "SELECT idUsuariosControlFechas, es_nuevo, dias_presupuesto, fecha_ingreso
+                FROM apoyo_combustibles.usuarioscontrolfechas
+                WHERE idUsuariosControlFechas = ?
+                  AND usuarioid               = ?
+                  AND activo                  = 1";
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([(int) $datos->ucfid, $datos->usuarioid]);
+            $ucf = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$ucf) {
+                return $this->res->fail('El período UCF no existe o no pertenece al usuario');
+            }
+            if (!$ucf['es_nuevo'] || (int) $ucf['dias_presupuesto'] <= 0) {
+                return $this->res->fail('El período UCF indicado no es un período de prueba');
+            }
+
+            $this->connect->beginTransaction();
+
+            $sql = "INSERT INTO apoyo_combustibles.registros_extraordinarios
+                    (usuarioid, ucfid, monto, descripcion, tipo, estado, registrado_por)
+                VALUES (?, ?, ?, ?, ?, 'pendiente', ?)";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([
+                $datos->usuarioid,
+                (int) $datos->ucfid,
+                round((float) $datos->monto, 2),
+                $datos->descripcion,
+                $datos->tipo ?? 'complemento_prueba',
+                $this->idUsuario,
+            ]);
+
+            $nuevoId = $this->connect->lastInsertId();
+            $this->connect->commit();
+
+            return $this->res->ok('Registro extraordinario creado correctamente', null, [
+                'id' => $nuevoId,
+            ]);
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en crearRegistroExtraordinario: " . $e->getMessage());
+            return $this->res->fail('Error al crear el registro extraordinario', $e);
+        }
+    }
+
+// ----------------------------------------------------------------------------
+
+    /**
+     * Edita monto o descripción de un registro extraordinario pendiente.
+     *
+     * POST: combustible/editarRegistroExtraordinario
+     *
+     * @param object $datos {
+     *   idRegistroExtraordinario : int,
+     *   monto?                   : float,
+     *   descripcion?             : string
+     * }
+     */
+    public function editarRegistroExtraordinario($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->idRegistroExtraordinario)) {
+                return $this->res->fail('El ID del registro es requerido');
+            }
+
+            $sql = "SELECT estado FROM apoyo_combustibles.registros_extraordinarios
+                WHERE idRegistroExtraordinario = ? AND activo = 1";
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([(int) $datos->idRegistroExtraordinario]);
+            $registro = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$registro) return $this->res->fail('El registro no existe');
+            if ($registro['estado'] !== 'pendiente') {
+                return $this->res->fail('Solo se pueden editar registros en estado pendiente');
+            }
+
+            $campos = [];
+            $valores = [];
+
+            if (isset($datos->monto)) {
+                if ((float) $datos->monto <= 0) return $this->res->fail('El monto debe ser mayor a 0');
+                $campos[]  = 'monto = ?';
+                $valores[] = round((float) $datos->monto, 2);
+            }
+            if (!empty($datos->descripcion)) {
+                $campos[]  = 'descripcion = ?';
+                $valores[] = $datos->descripcion;
+            }
+            if (empty($campos)) return $this->res->fail('No hay campos para actualizar');
+
+            $valores[] = (int) $datos->idRegistroExtraordinario;
+
+            $this->connect->beginTransaction();
+            $stmt = $this->connect->prepare(
+                "UPDATE apoyo_combustibles.registros_extraordinarios
+             SET " . implode(', ', $campos) . "
+             WHERE idRegistroExtraordinario = ?"
+            );
+            $stmt->execute($valores);
+            $this->connect->commit();
+
+            return $this->res->ok('Registro actualizado correctamente');
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en editarRegistroExtraordinario: " . $e->getMessage());
+            return $this->res->fail('Error al editar el registro', $e);
+        }
+    }
+
+// ----------------------------------------------------------------------------
+
+    /**
+     * Cancela un registro extraordinario pendiente.
+     *
+     * POST: combustible/cancelarRegistroExtraordinario
+     *
+     * @param object $datos { idRegistroExtraordinario: int }
+     */
+    public function cancelarRegistroExtraordinario($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->idRegistroExtraordinario)) {
+                return $this->res->fail('El ID del registro es requerido');
+            }
+
+            $sql = "SELECT estado FROM apoyo_combustibles.registros_extraordinarios
+                WHERE idRegistroExtraordinario = ? AND activo = 1";
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([(int) $datos->idRegistroExtraordinario]);
+            $registro = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$registro) return $this->res->fail('El registro no existe');
+            if ($registro['estado'] !== 'pendiente') {
+                return $this->res->fail('Solo se pueden cancelar registros pendientes');
+            }
+
+            $this->connect->beginTransaction();
+            $stmt = $this->connect->prepare(
+                "UPDATE apoyo_combustibles.registros_extraordinarios
+             SET estado = 'cancelado'
+             WHERE idRegistroExtraordinario = ?"
+            );
+            $stmt->execute([(int) $datos->idRegistroExtraordinario]);
+            $this->connect->commit();
+
+            return $this->res->ok('Registro extraordinario cancelado');
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en cancelarRegistroExtraordinario: " . $e->getMessage());
+            return $this->res->fail('Error al cancelar el registro', $e);
+        }
+    }
+
+// ============================================================================
+// HELPER PRIVADO — presupuesto de prueba por rango mensual variable
+// ============================================================================
+
+    /**
+     * Calcula el presupuesto del período de prueba usando tarifa diaria
+     * variable (monto_mensual / días_del_mes) igual que el resto del sistema.
+     */
+    private function _calcularPresupuestoPruebaRangoMensual(
+        string $fechaInicio,
+        string $fechaFin,
+        float  $montoMensual,
+        float  $porcentaje
+    ): float {
+        if ($montoMensual <= 0 || $porcentaje <= 0) return 0.0;
+
+        $inicio = new \DateTime($fechaInicio);
+        $fin    = new \DateTime($fechaFin);
+        $total  = 0.0;
+        $cursor = new \DateTime($inicio->format('Y-m-01'));
+
+        while ($cursor <= $fin) {
+            $diasDelMes   = (int) $cursor->format('t');
+            $tarifaDiaria = ($montoMensual / $diasDelMes) * $porcentaje;
+
+            $iniEf = $cursor < $inicio ? clone $inicio : clone $cursor;
+            $finMes = new \DateTime($cursor->format('Y-m-') . str_pad($diasDelMes, 2, '0', STR_PAD_LEFT));
+            $finEf  = $finMes < $fin ? clone $finMes : clone $fin;
+
+            $dias = (int) $iniEf->diff($finEf)->days + 1;
+            if ($dias > 0) $total += $tarifaDiaria * $dias;
+
+            $cursor->modify('+1 month');
+        }
+
+        return $total;
+    }
 }
