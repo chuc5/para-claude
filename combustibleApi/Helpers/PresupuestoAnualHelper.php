@@ -149,7 +149,7 @@ class PresupuestoAnualHelper
 
             if ($enPeriodoPrueba) {
                 $presupuestoTotal = $this->_calcularPeriodoPrueba(
-                    $periodo, $montoMensual, $hoy, $fechaIngreso, $fechaFinPrueba, $detalle
+                    $periodo, $montoMensual, $hoy, $fechaIngreso, $fechaFinPrueba, $inicioAnio, $detalle
                 );
             } else {
                 $presupuestoTotal = $this->_calcularPeriodoNormal(
@@ -184,6 +184,8 @@ class PresupuestoAnualHelper
      * Presupuesto cuando el usuario está EN período de prueba.
      * Calcula desde fechaIngreso hasta fechaFinPrueba con % reducido.
      * La tarifa varía mes a mes: monto_mensual / días_del_mes.
+     * Si el trial inició en el año anterior, solo se calcula la porción
+     * que cae dentro del año actual (proporcional por día).
      */
     private function _calcularPeriodoPrueba(
         $periodo,
@@ -191,17 +193,29 @@ class PresupuestoAnualHelper
         \DateTime $hoy,
         \DateTime $fechaIngreso,
         \DateTime $fechaFinPrueba,
+        \DateTime $inicioAnio,
         array &$detalle
     ): float {
         $porcentaje = $periodo['porcentaje_presupuesto'] / 100;
         $diasPrueba = $periodo['dias_presupuesto'];
 
-        $presupuestoTotalPrueba = $this->_calcularPresupuestoPruebaTotal(
-            $fechaIngreso->format('Y-m-d'),
-            $fechaFinPrueba->format('Y-m-d'),
-            $montoMensual,
-            $porcentaje
-        );
+        // Si el trial cruzó el año (ingreso en año anterior), calcular solo la
+        // porción dentro del año actual usando tarifa proporcional por día.
+        if ($fechaIngreso < $inicioAnio) {
+            $presupuestoTotalPrueba = $this->_calcularPorRangoMensual(
+                $inicioAnio->format('Y-m-d'),
+                $fechaFinPrueba->format('Y-m-d'),
+                $montoMensual,
+                $porcentaje
+            );
+        } else {
+            $presupuestoTotalPrueba = $this->_calcularPresupuestoPruebaTotal(
+                $fechaIngreso->format('Y-m-d'),
+                $fechaFinPrueba->format('Y-m-d'),
+                $montoMensual,
+                $porcentaje
+            );
+        }
 
         $diasRestantesPrueba = max(0, (int) $hoy->diff($fechaFinPrueba)->days + 1);
 
@@ -240,12 +254,23 @@ class PresupuestoAnualHelper
             $fechaInicioCalculo = (clone $fechaFinPrueba)->modify('+1 day');
             $porcentajePrueba   = $periodo['porcentaje_presupuesto'] / 100;
 
-            $presupuestoTramoPrueba = $this->_calcularPresupuestoPruebaTotal(
-                $fechaIngreso->format('Y-m-d'),
-                $fechaFinPrueba->format('Y-m-d'),
-                $montoMensual,
-                $porcentajePrueba
-            );
+            // Si el trial inició en el año anterior, solo contabilizar la porción
+            // del trial que cae dentro del año actual (tarifa proporcional por día).
+            if ($fechaIngreso < $inicioAnio) {
+                $presupuestoTramoPrueba = $this->_calcularPorRangoMensual(
+                    $inicioAnio->format('Y-m-d'),
+                    $fechaFinPrueba->format('Y-m-d'),
+                    $montoMensual,
+                    $porcentajePrueba
+                );
+            } else {
+                $presupuestoTramoPrueba = $this->_calcularPresupuestoPruebaTotal(
+                    $fechaIngreso->format('Y-m-d'),
+                    $fechaFinPrueba->format('Y-m-d'),
+                    $montoMensual,
+                    $porcentajePrueba
+                );
+            }
 
             $detalle['periodo_actual']         = 'post_prueba';
             $detalle['fecha_fin_restriccion']  = $fechaFinPrueba->format('Y-m-d');
@@ -599,24 +624,37 @@ class PresupuestoAnualHelper
                 $strFinPrueba = $fechaFinRestriccion->format('Y-m-d');
                 $strIniNormal = (clone $fechaFinRestriccion)->modify('+1 day')->format('Y-m-d');
 
-                // Tramo prueba: fórmula de meses completos/parciales (intacta)
-                $presupuestoPrueba = $this->_calcularPresupuestoPruebaTotal(
-                    $fechaIngreso->format('Y-m-d'),
-                    $strFinPrueba,
-                    $montoMensual,
-                    $porcentaje
-                );
-
-                // Tramo normal: tarifa variable
-                $presupuestoNormal = 0.0;
-                $strNormalInicio   = new \DateTime($strIniNormal);
-                if ($strNormalInicio <= $fechaEgreso) {
-                    $presupuestoNormal = $this->_calcularPorRangoMensual(
-                        $strIniNormal,
-                        $fechaEgreso->format('Y-m-d'),
+                // Si el trial termina después del fin del año histórico, solo
+                // calcular la porción del trial dentro de ese año (proporcional
+                // por día). No hay tramo normal: la prueba continúa en el año siguiente.
+                if ($fechaFinRestriccion > $finAnio) {
+                    $presupuestoPrueba = $this->_calcularPorRangoMensual(
+                        $fechaIngreso->format('Y-m-d'),
+                        $finAnio->format('Y-m-d'),
                         $montoMensual,
-                        1.0
+                        $porcentaje
                     );
+                    $presupuestoNormal = 0.0;
+                } else {
+                    // Trial completo dentro del año: fórmula original (meses completos/parciales)
+                    $presupuestoPrueba = $this->_calcularPresupuestoPruebaTotal(
+                        $fechaIngreso->format('Y-m-d'),
+                        $strFinPrueba,
+                        $montoMensual,
+                        $porcentaje
+                    );
+
+                    // Tramo normal: tarifa variable
+                    $presupuestoNormal = 0.0;
+                    $strNormalInicio   = new \DateTime($strIniNormal);
+                    if ($strNormalInicio <= $fechaEgreso) {
+                        $presupuestoNormal = $this->_calcularPorRangoMensual(
+                            $strIniNormal,
+                            $fechaEgreso->format('Y-m-d'),
+                            $montoMensual,
+                            1.0
+                        );
+                    }
                 }
 
                 $presupuestoPeriodo = $presupuestoPrueba + $presupuestoNormal;
