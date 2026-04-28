@@ -25,6 +25,7 @@ use App\combustibleApi\Helpers\ValidacionHelper;
 use App\combustibleApi\Helpers\MensajeContextualHelper;
 use App\combustibleApi\Helpers\MantenimientoLiquidacionesHelper;
 use App\combustibleApi\Helpers\EnvioPagoLiquidacionesHelper;
+use App\combustibleApi\Helpers\PresupuestoRangoHelper;
 
 /**
  * ============================================================================
@@ -124,6 +125,20 @@ final class combustibleApiClass extends ConexionBD
         //? extraordinarios
         'listarRegistrosExtraordinarios',
         'obtenerResumenPruebaPorUsuario',
+        'obtenerDetallePeriodoPrueba',
+        'listarCandidatosRegistroExtraordinario',
+        'exportarCandidatosPago',
+        'listarPeriodosDescartados',
+        //? Aprobaciones Gerencia
+        'obtenerEstadoSolicitud',
+        //? REPORTE COMPROBANTE
+        'listarReporteComprobantes',
+        'obtenerDetalleComprobante',
+        //? REPORTE APROBACIONES
+        'listarReporteAprobaciones',
+        'obtenerDetalleAprobacion',
+        //? Configuracion
+        'obtenerConfigLiquidaciones',
 
     ];
 
@@ -181,6 +196,7 @@ final class combustibleApiClass extends ConexionBD
         'eliminarLiquidacion',
         'crearSolicitudAutorizacion',
         'obtenerDetalleSolicitudAutorizacion',
+        'reenviarLiquidacionARevision',
         //? Autorizaciones
         'aprobarSolicitudAutorizacion',
         'rechazarSolicitudAutorizacion',
@@ -206,6 +222,15 @@ final class combustibleApiClass extends ConexionBD
         'crearRegistroExtraordinario',
         'editarRegistroExtraordinario',
         'cancelarRegistroExtraordinario',
+        'descartarPeriodoPrueba',
+        'restaurarPeriodoDescartado',
+        'crearRegistrosExtraordinariosMasivo',
+        //? Aprobaciones Gerencia
+        'enviarSolicitudAprobacion',
+        'resolverSolicitud',
+        'reenviarSolicitud',
+        //? Configuracion
+        'actualizarConfigLiquidaciones',
 
     ];
 
@@ -4599,7 +4624,7 @@ final class combustibleApiClass extends ConexionBD
             $this->_inicializarHelpersLiquidaciones();
             $anio = date('Y');
 
-            $presupuesto = $this->presupuestoAnualHelper->obtener($anio);
+            $presupuesto = $this->presupuestoAnualHelper->obtener($anio, true);
 
             if (!$presupuesto) {
                 return $this->res->fail('No existe presupuesto configurado para su agencia y puesto');
@@ -5074,15 +5099,19 @@ final class combustibleApiClass extends ConexionBD
                 apc.fecha_comprobante as fecha_pago,
                 sa.fecha_solicitud AS autorizacion_fecha,
                 (SELECT COUNT(*) FROM apoyo_combustibles.solicitudescorreccion sc WHERE sc.liquidacionid = l.idLiquidaciones AND sc.estado = 'pendiente') AS tiene_correccion_pendiente
-                FROM
-                    apoyo_combustibles.liquidaciones AS l
-                    LEFT JOIN apoyo_combustibles.vehiculos AS v ON l.vehiculoid = v.idVehiculos
-                    LEFT JOIN apoyo_combustibles.tiposvehiculo AS tv ON v.tipovehiculoid = tv.idTiposVehiculo
-                    LEFT JOIN apoyo_combustibles.tiposapoyo AS ta ON l.tipoapoyoid = ta.idTiposApoyo
-                    LEFT JOIN apoyo_combustibles.solicitudesautorizacion AS sa ON l.solicitudautorizacionid = sa.idSolicitudesAutorizacion
-                    LEFT JOIN apoyo_combustibles.comprobantescontables AS apc ON apc.idComprobantesContables = l.comprobantecontableid
-                WHERE l.usuarioid = ?
+            FROM
+                apoyo_combustibles.liquidaciones AS l
+                LEFT JOIN apoyo_combustibles.vehiculos AS v ON l.vehiculoid = v.idVehiculos
+                LEFT JOIN apoyo_combustibles.tiposvehiculo AS tv ON v.tipovehiculoid = tv.idTiposVehiculo
+                LEFT JOIN apoyo_combustibles.tiposapoyo AS ta ON l.tipoapoyoid = ta.idTiposApoyo
+                LEFT JOIN apoyo_combustibles.solicitudesautorizacion AS sa ON l.solicitudautorizacionid = sa.idSolicitudesAutorizacion
+                LEFT JOIN apoyo_combustibles.comprobantescontables AS apc ON apc.idComprobantesContables = l.comprobantecontableid
+            WHERE 
+                l.usuarioid = ?
                 AND l.estado != 'eliminada'
+                -- FILTRO DE TIEMPO:
+                AND l.fecha_liquidacion >= DATE_SUB(CURDATE(), INTERVAL 4 MONTH)
+                AND YEAR(l.fecha_liquidacion) = YEAR(CURDATE())
             ORDER BY l.fecha_liquidacion DESC";
 
             $stmt = $this->connect->prepare($sql);
@@ -5100,6 +5129,73 @@ final class combustibleApiClass extends ConexionBD
         }
     }
 
+
+    /**
+     * GET combustible/obtenerConfigLiquidaciones
+     */
+    public function obtenerConfigLiquidaciones()
+    {
+        try {
+            $valor = $this->_getConfig('permitir_nuevas_liquidaciones');
+
+            return $this->res->ok('Configuración obtenida', ['valor' => $valor]);
+
+        } catch (Exception $e) {
+            error_log("[obtenerConfigLiquidaciones] " . $e->getMessage());
+            return $this->res->fail('Error al obtener la configuración');
+        }
+    }
+
+    /**
+     * POST combustible/actualizarConfigLiquidaciones
+     * Body: { permitir_nuevas_liquidaciones: 1|0, descripcion?: string }
+     */
+    public function actualizarConfigLiquidaciones($datos)
+    {
+        try {
+            // Casteo explícito: acepta 1, '1', true → '1'; cualquier otra cosa → '0'
+            $nuevoValor = ((int)($datos->permitir_nuevas_liquidaciones ?? 0) === 1) ? '1' : '0';
+            $descripcion = $datos->descripcion ?? 'Cambio manual desde panel de administración';
+
+            $sql = "INSERT INTO apoyo_combustibles.configuracion_sistema 
+                    (modulo, clave, valor, tipo_dato, descripcion)
+                VALUES 
+                    ('liquidaciones', 'permitir_nuevas_liquidaciones', ?, 'boolean', ?)
+                ON DUPLICATE KEY UPDATE
+                    valor       = VALUES(valor),
+                    descripcion = VALUES(descripcion),
+                    updated_at  = CURRENT_TIMESTAMP";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$nuevoValor, $descripcion]);
+
+            return $this->res->ok('Configuración actualizada correctamente');
+
+        } catch (Exception $e) {
+            error_log("[actualizarConfigLiquidaciones] " . $e->getMessage());
+            return $this->res->fail('Error al actualizar la configuración');
+        }
+    }
+
+    /**
+     * Obtiene el valor crudo (string) de una clave de configuración.
+     * Retorna $default si no existe o está inactiva.
+     */
+    private function _getConfig(string $clave, string $default = '0'): string
+    {
+        $sql = "SELECT valor 
+            FROM apoyo_combustibles.configuracion_sistema 
+            WHERE modulo = 'liquidaciones' 
+              AND clave  = ? 
+              AND activo = 1 
+            LIMIT 1";
+
+        $stmt = $this->connect->prepare($sql);
+        $stmt->execute([$clave]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $row ? (string)$row['valor'] : $default;
+    }
     /**
      * Crea una nueva liquidación
      *
@@ -5117,7 +5213,12 @@ final class combustibleApiClass extends ConexionBD
     public function crearLiquidacion($datos)
     {
         try {
-            return $this->res->info('Sistema Bloqueado no se permite nuevas liquidaciones ');
+            if ($this->_getConfig('permitir_nuevas_liquidaciones') === '0') {
+                return $this->res->info(
+                    'Sistema temporalmente bloqueado. No se permiten nuevas liquidaciones.'
+                );
+            }
+
             $datos = $this->limpiarDatos($datos);
 
             // Validaciones básicas
@@ -6212,148 +6313,6 @@ final class combustibleApiClass extends ConexionBD
 // ========================================================================
 
     /**
-     * Método privado para obtener liquidaciones con filtros
-     */
-    private function _obtenerLiquidacionesPendientesRevision2($filtros = [])
-    {
-        // Base de la consulta
-        $sql = "SELECT 
-        l.idLiquidaciones,
-        l.usuarioid,
-        l.numero_factura,
-        l.vehiculoid,
-        l.tipoapoyoid,
-        l.descripcion,
-        l.detalle,
-        l.monto,
-        l.monto_factura,
-        l.estado,
-        l.fecha_liquidacion,
-        l.solicitudautorizacionid,
-        l.revisado_por,
-        l.fecha_revision,
-        l.motivo_rechazo,
-        l.created_at,
-        l.updated_at,
-        -- Usuario
-        CONCAT(dtp.nombres) as nombre_usuario,
-        ag.nombre as agencia_usuario,
-        p.nombre as puesto_usuario,
-        -- Revisor
-        CONCAT(dtp_rev.nombres) as nombre_revisor,
-        -- Vehículo
-        v.placa as vehiculo_placa,
-        v.marca as vehiculo_marca,
-        tv.nombre as tipo_vehiculo,
-        -- Tipo Apoyo
-        ta.codigo as tipo_apoyo_codigo,
-        ta.nombre as tipo_apoyo,
-        -- Autorización
-        sa.estado as autorizacion_estado,
-        sa.fecha_respuesta as autorizacion_fecha,
-        -- Factura
-        f.fecha_emision,
-        f.nombre_emisor,
-        -- Corrección pendiente
-        (SELECT COUNT(*) 
-         FROM apoyo_combustibles.solicitudescorreccion sc 
-         WHERE sc.liquidacionid = l.idLiquidaciones 
-         AND sc.estado = 'pendiente') as tiene_correccion_pendiente
-    FROM apoyo_combustibles.liquidaciones l
-    INNER JOIN dbintranet.usuarios us ON CONVERT(l.usuarioid USING utf8mb4) = CONVERT(us.idUsuarios USING utf8mb4)
-    INNER JOIN dbintranet.datospersonales dtp ON us.idDatosPersonales = dtp.idDatosPersonales
-    INNER JOIN dbintranet.agencia ag ON us.idAgencia = ag.idAgencia
-    INNER JOIN dbintranet.puesto p ON us.idPuesto = p.idPuesto
-    LEFT JOIN dbintranet.usuarios us_rev ON CONVERT(l.revisado_por USING utf8mb4) = CONVERT(us_rev.idUsuarios USING utf8mb4)
-    LEFT JOIN dbintranet.datospersonales dtp_rev ON us_rev.idDatosPersonales = dtp_rev.idDatosPersonales
-    LEFT JOIN apoyo_combustibles.vehiculos v ON l.vehiculoid = v.idVehiculos
-    LEFT JOIN apoyo_combustibles.tiposvehiculo tv ON v.tipovehiculoid = tv.idTiposVehiculo
-    INNER JOIN apoyo_combustibles.tiposapoyo ta ON l.tipoapoyoid = ta.idTiposApoyo
-    LEFT JOIN apoyo_combustibles.solicitudesautorizacion sa ON l.solicitudautorizacionid = sa.idSolicitudesAutorizacion
-    INNER JOIN compras.facturas_sat f ON CONVERT(l.numero_factura USING utf8mb4) = CONVERT(f.numero_dte USING utf8mb4)
-    WHERE 1=1";
-
-        $params = [];
-
-        // =====================================================================
-        // FILTRO DE FECHAS (Conjuntas: created_at O updated_at)
-        // =====================================================================
-        if (!empty($filtros['fecha_inicio']) && !empty($filtros['fecha_fin'])) {
-            // Busca liquidaciones donde CUALQUIERA de las dos fechas esté en el rango
-            $sql .= " AND (
-            (DATE(l.created_at) BETWEEN ? AND ?) 
-            OR 
-            (DATE(l.updated_at) BETWEEN ? AND ?)
-        )";
-            $params[] = $filtros['fecha_inicio'];
-            $params[] = $filtros['fecha_fin'];
-            $params[] = $filtros['fecha_inicio'];
-            $params[] = $filtros['fecha_fin'];
-        } elseif (!empty($filtros['fecha_inicio'])) {
-            // Solo fecha inicio
-            $sql .= " AND (DATE(l.created_at) >= ? OR DATE(l.updated_at) >= ?)";
-            $params[] = $filtros['fecha_inicio'];
-            $params[] = $filtros['fecha_inicio'];
-        } elseif (!empty($filtros['fecha_fin'])) {
-            // Solo fecha fin
-            $sql .= " AND (DATE(l.created_at) <= ? OR DATE(l.updated_at) <= ?)";
-            $params[] = $filtros['fecha_fin'];
-            $params[] = $filtros['fecha_fin'];
-        }
-
-        // =====================================================================
-        // FILTRO DE AGENCIA
-        // =====================================================================
-        if (!empty($filtros['agenciaid'])) {
-            $sql .= " AND us.idAgencia = ?";
-            $params[] = $filtros['agenciaid'];
-        }
-
-        // =====================================================================
-        // FILTRO DE PUESTO
-        // =====================================================================
-        if (!empty($filtros['puestoid'])) {
-            $sql .= " AND us.idPuesto = ?";
-            $params[] = $filtros['puestoid'];
-        }
-
-        // =====================================================================
-        // FILTRO DE ESTADO
-        // =====================================================================
-        if (!empty($filtros['estado'])) {
-            $sql .= " AND l.estado = ?";
-            $params[] = $filtros['estado'];
-        } else {
-            // Si no se especifica estado, mostrar solo: enviada, devuelta, corregida
-            $sql .= " AND l.estado IN ('enviada', 'devuelta', 'corregida')";
-        }
-
-        // =====================================================================
-        // FILTRO DE NÚMERO DE FACTURA
-        // =====================================================================
-        if (!empty($filtros['numero_factura'])) {
-            $sql .= " AND CONVERT(l.numero_factura USING utf8mb4) LIKE ?";
-            $params[] = '%' . $filtros['numero_factura'] . '%';
-        }
-
-        // Ordenar por fecha de actualización (más recientes primero)
-        $sql .= " ORDER BY l.updated_at DESC, l.created_at DESC";
-
-        try {
-            $stmt = $this->connect->prepare($sql);
-            $stmt->execute($params);
-            $liquidaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-            return $liquidaciones;
-        } catch (Exception $e) {
-            error_log("Error en _obtenerLiquidacionesPendientesRevision: " . $e->getMessage());
-            error_log("SQL: " . $sql);
-            error_log("Params: " . json_encode($params));
-            throw $e;
-        }
-    }
-
-    /**
      * Esta versión simplifica la lógica ya que ahora solo manejamos fecha_fin
      */
     private function _obtenerLiquidacionesPendientesRevision($filtros = [])
@@ -6504,6 +6463,7 @@ final class combustibleApiClass extends ConexionBD
     l.revisado_por,
     l.fecha_revision,
     l.motivo_rechazo,
+    l.comprobantecontableid,
     l.created_at,
     l.updated_at,
     -- Datos del usuario
@@ -6532,16 +6492,14 @@ LEFT JOIN dbintranet.datospersonales dtp_rev ON us_rev.idDatosPersonales = dtp_r
 LEFT JOIN apoyo_combustibles.vehiculos v ON l.vehiculoid = v.idVehiculos
 LEFT JOIN apoyo_combustibles.tiposvehiculo tv ON v.tipovehiculoid = tv.idTiposVehiculo
 LEFT JOIN apoyo_combustibles.tiposapoyo ta ON l.tipoapoyoid = ta.idTiposApoyo
--- CORRECCIÓN 1: El JOIN con compras.facturas_sat
 LEFT JOIN compras.facturas_sat fs 
     ON l.numero_factura COLLATE utf8mb4_general_ci = fs.numero_dte COLLATE utf8mb4_general_ci
--- CORRECCIÓN 2: El filtrado de estados
 WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta', 'corregida', 'de_baja', 'en_lote', 'pagada')
-    AND l.revisado_por IS NOT NULL;";
+    AND l.revisado_por IS NOT NULL";
+            // ↑ CORRECCIÓN: quitado el punto y coma (;) que cortaba la query
 
             $params = [];
 
-            // Aplicar filtros opcionales
             if (!empty($filtros['fecha_inicio'])) {
                 $sql .= " AND DATE(l.fecha_revision) >= ?";
                 $params[] = $filtros['fecha_inicio'];
@@ -6567,7 +6525,12 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 $params[] = "%{$filtros['numero_factura']}%";
             }
 
-            $sql .= " ORDER BY l.fecha_revision DESC";
+            if (!empty($filtros['nombre_usuario'])) {
+                $sql .= " AND dtp.nombres LIKE ?";
+                $params[] = "%{$filtros['nombre_usuario']}%";
+            }
+
+            $sql .= " ORDER BY l.fecha_revision DESC LIMIT 100";
 
             $stmt = $this->connect->prepare($sql);
             $stmt->execute($params);
@@ -6580,6 +6543,50 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         }
     }
 
+    public function reenviarLiquidacionARevision($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->idLiquidaciones)) {
+                return $this->res->fail('El ID de la liquidación es requerido');
+            }
+
+            $sql = "SELECT idLiquidaciones, estado, comprobantecontableid
+                FROM apoyo_combustibles.liquidaciones
+                WHERE idLiquidaciones = ?";
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$datos->idLiquidaciones]);
+            $liquidacion = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$liquidacion) {
+                return $this->res->fail('La liquidación no existe');
+            }
+
+            if (!empty($liquidacion['comprobantecontableid'])) {
+                return $this->res->fail('No se puede modificar: la liquidación ya tiene un comprobante asignado');
+            }
+
+            if ($liquidacion['estado'] === 'enviada') {
+                return $this->res->fail('La liquidación ya se encuentra en estado enviada');
+            }
+
+            $sql = "UPDATE apoyo_combustibles.liquidaciones
+                SET estado = 'enviada',
+                    revisado_por = NULL,
+                    fecha_revision = NULL,
+                    motivo_rechazo = NULL
+                WHERE idLiquidaciones = ?";
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$datos->idLiquidaciones]);
+
+            return $this->res->ok('Liquidación reenviada a revisión correctamente');
+
+        } catch (Exception $e) {
+            error_log("Error en reenviarLiquidacionARevision: " . $e->getMessage());
+            return $this->res->fail('Error al reenviar la liquidación', $e);
+        }
+    }
     /**
      * Obtiene solicitudes de corrección de un usuario
      *
@@ -7514,7 +7521,7 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
     }
 
 // ============================================================================
-// ENDPOINTS - COMPROBANTES Y LIQUIDACIONES
+//? ENDPOINTS - COMPROBANTES Y LIQUIDACIONES
 // ============================================================================
 
     /**
@@ -7527,9 +7534,23 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         try {
             $registros = $this->_obtenerLiquidacionesSinComprobante();
 
+            // Resumen por agencia: suma TotalLiquidaciones agrupado por Agencia
+            $resumenAgencia = [];
+            foreach ($registros as $r) {
+                $ag = $r['Agencia'];
+                if (!isset($resumenAgencia[$ag])) {
+                    $resumenAgencia[$ag] = ['agencia' => $ag, 'total' => 0.0];
+                }
+                $resumenAgencia[$ag]['total'] = round(
+                    $resumenAgencia[$ag]['total'] + $r['TotalLiquidaciones'], 2
+                );
+            }
+            ksort($resumenAgencia);
+
             return $this->res->ok('Liquidaciones obtenidas correctamente', [
-                'registros' => $registros,
-                'total' => count($registros)
+                'registros'       => $registros,
+                'total'           => count($registros),
+                'resumen_agencia' => array_values($resumenAgencia),
             ]);
 
         } catch (Exception $e) {
@@ -7539,13 +7560,14 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
     }
 
     /**
-     * Obtiene el detalle completo de liquidaciones de un usuario específico
+     * Obtiene el detalle completo de liquidaciones de un usuario específico,
+     * filtrado por UCF si se proporciona ucfid.
      *
      * POST: combustible/obtenerDetalleLiquidacionesUsuario
      *
      * @param object $datos {
-     *   usuarioid: string,
-     *   codigoCliente?: string
+     *   usuarioid : string,
+     *   ucfid?    : int|null   — si se envía, filtra por el rango del UCF
      * }
      */
     public function obtenerDetalleLiquidacionesUsuario($datos)
@@ -7553,89 +7575,148 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         try {
             $datos = $this->limpiarDatos($datos);
 
+
             if (empty($datos->usuarioid)) {
                 return $this->res->fail('El ID de usuario es requerido');
             }
 
-            // Obtener información del usuario
-            $sqlUsuario = "SELECT 
-            cli.CodigoCliente,
-            dtp.nombres AS NombreUsuario,
-            ag.nombre AS Agencia,
-            pu.nombre AS Puesto,
-            (
-                SELECT cap2.NumeroCuenta
-                FROM asociado_t24.ccomndatoscaptaciones AS cap2
-                WHERE cap2.Cliente = cli.CodigoCliente
-                    AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
-                ORDER BY cap2.NumeroCuenta
-                LIMIT 1
-            ) AS PrimeraCuenta,
-            SUM(l.monto) AS TotalLiquidaciones,
-            COUNT(l.idLiquidaciones) AS CantidadLiquidaciones
-        FROM
-            apoyo_combustibles.liquidaciones AS l
-            LEFT JOIN dbintranet.usuarios AS us ON l.usuarioid = us.idUsuarios
-            LEFT JOIN dbintranet.datospersonales AS dtp ON dtp.idDatosPersonales = us.idDatosPersonales
-            LEFT JOIN asociado_t24.comndatosclientes AS cli ON dtp.dpi = cli.Dpi
+            // ucfid puede llegar como int, string numérico, "null" o null
+            $ucfidRaw  = $datos->ucfid ?? null;
+            $ucfid     = ($ucfidRaw !== null && $ucfidRaw !== '' && $ucfidRaw !== 'null')
+                ? (int) $ucfidRaw
+                : null;
+            $esSinUcf  = isset($datos->tipo_fila) && $datos->tipo_fila === 'sin_ucf';
+
+            $fechaDesde = null;
+            $fechaHasta = null;
+            $agencia    = null;
+            $puesto     = null;
+
+            // Si viene ucfid válido, obtener fechas y agencia/puesto del UCF
+            if ($ucfid > 0) {
+                $sqlUcf = "SELECT ucf.fecha_ingreso, ucf.fecha_egreso,
+                                  ag.nombre AS agencia, pu.nombre AS puesto
+                           FROM apoyo_combustibles.usuarioscontrolfechas ucf
+                           INNER JOIN dbintranet.agencia ag ON ag.idAgencia = ucf.agenciaid
+                           INNER JOIN dbintranet.puesto  pu ON pu.idPuesto  = ucf.puestoid
+                           WHERE ucf.idUsuariosControlFechas = ?
+                             AND ucf.usuarioid = ?
+                             AND ucf.activo = 1";
+                $stmt = $this->connect->prepare($sqlUcf);
+                $stmt->execute([$ucfid, $datos->usuarioid]);
+                $ucf = $stmt->fetch(PDO::FETCH_ASSOC);
+
+                if ($ucf) {
+                    $fechaDesde = $ucf['fecha_ingreso'];
+                    $fechaHasta = $ucf['fecha_egreso'] ?? date('Y-12-31');
+                    $agencia    = $ucf['agencia'];
+                    $puesto     = $ucf['puesto'];
+                }
+            }
+
+            // Construir filtro de fecha
+            $filtroFecha = '';
+            $params      = [$datos->usuarioid];
+
+            if ($fechaDesde && $fechaHasta) {
+                // Fila UCF: solo liquidaciones dentro del rango del UCF
+                $filtroFecha = 'AND DATE(l.fecha_liquidacion) >= ? AND DATE(l.fecha_liquidacion) <= ?';
+                $params[]    = $fechaDesde;
+                $params[]    = $fechaHasta;
+            } elseif ($esSinUcf) {
+                // Fila sin_ucf: excluir liquidaciones que caen dentro de algún UCF del usuario
+                $filtroFecha = "AND DATE(l.fecha_liquidacion) NOT IN (
+                    SELECT DATE(l2.fecha_liquidacion)
+                    FROM apoyo_combustibles.liquidaciones l2
+                    INNER JOIN apoyo_combustibles.usuarioscontrolfechas ucf2
+                        ON l2.usuarioid = ucf2.usuarioid
+                        AND ucf2.activo = 1
+                        AND DATE(l2.fecha_liquidacion) >= ucf2.fecha_ingreso
+                        AND DATE(l2.fecha_liquidacion) <= COALESCE(ucf2.fecha_egreso, '9999-12-31')
+                    WHERE l2.usuarioid = ?
+                )";
+                $params[] = $datos->usuarioid;
+            }
+
+            // Información del usuario + totales
+            $sqlUsuario = "SELECT
+                cli.CodigoCliente,
+                dtp.nombres AS NombreUsuario,
+                ag.nombre   AS Agencia,
+                pu.nombre   AS Puesto,
+                (
+                    SELECT cap2.NumeroCuenta
+                    FROM asociado_t24.ccomndatoscaptaciones AS cap2
+                    WHERE cap2.Cliente = cli.CodigoCliente
+                      AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
+                    ORDER BY cap2.NumeroCuenta
+                    LIMIT 1
+                ) AS PrimeraCuenta,
+                SUM(l.monto)           AS TotalLiquidaciones,
+                COUNT(l.idLiquidaciones) AS CantidadLiquidaciones
+            FROM apoyo_combustibles.liquidaciones AS l
+            LEFT JOIN dbintranet.usuarios AS us
+                ON l.usuarioid = us.idUsuarios
+            LEFT JOIN dbintranet.datospersonales AS dtp
+                ON dtp.idDatosPersonales = us.idDatosPersonales
+            LEFT JOIN asociado_t24.comndatosclientes AS cli
+                ON cli.Dpi = dtp.dpi
             INNER JOIN dbintranet.agencia AS ag ON ag.idAgencia = us.idAgencia
-            INNER JOIN dbintranet.puesto AS pu ON pu.idPuesto = us.idPuesto
-        WHERE
-            l.usuarioid = ?
-            AND l.estado = 'aprobada'
-            AND l.comprobantecontableid IS NULL
-        GROUP BY
-            cli.CodigoCliente,
-            dtp.nombres,
-            ag.nombre,
-            pu.nombre";
+            INNER JOIN dbintranet.puesto  AS pu ON pu.idPuesto  = us.idPuesto
+            WHERE l.usuarioid = ?
+              AND l.estado = 'aprobada'
+              AND l.comprobantecontableid IS NULL
+              {$filtroFecha}
+            GROUP BY cli.CodigoCliente, dtp.nombres, ag.nombre, pu.nombre";
 
             $stmt = $this->connect->prepare($sqlUsuario);
-            $stmt->execute([$datos->usuarioid]);
+            $stmt->execute($params);
             $usuario = $stmt->fetch(PDO::FETCH_ASSOC);
 
             if (!$usuario) {
                 return $this->res->fail('No se encontró información del usuario o no tiene liquidaciones pendientes');
             }
 
-            // Obtener detalle de liquidaciones
-            $sqlLiquidaciones = "SELECT 
-            l.idLiquidaciones,
-            l.numero_factura,
-            l.monto,
-            l.monto_factura,
-            l.descripcion,
-            l.detalle,
-            l.fecha_liquidacion,
-            l.estado,
-            ta.nombre AS tipo_apoyo,
-            v.marca AS vehiculo,
-            v.placa
-        FROM apoyo_combustibles.liquidaciones l
-        LEFT JOIN apoyo_combustibles.tiposapoyo ta ON l.tipoapoyoid = ta.idTiposApoyo
-        LEFT JOIN apoyo_combustibles.vehiculos v ON l.vehiculoid = v.idVehiculos
-        WHERE l.usuarioid = ?
-            AND l.estado = 'aprobada'
-            AND l.comprobantecontableid IS NULL
-        ORDER BY l.fecha_liquidacion DESC";
+            // Si el UCF tiene agencia/puesto propios, usarlos en la respuesta
+            if ($agencia) $usuario['Agencia'] = $agencia;
+            if ($puesto)  $usuario['Puesto']  = $puesto;
 
-            $stmt = $this->connect->prepare($sqlLiquidaciones);
-            $stmt->execute([$datos->usuarioid]);
+            // Detalle de liquidaciones filtrado
+            $sqlLiq = "SELECT
+                l.idLiquidaciones,
+                l.numero_factura,
+                l.monto,
+                l.monto_factura,
+                l.descripcion,
+                l.detalle,
+                l.fecha_liquidacion,
+                l.estado,
+                ta.nombre AS tipo_apoyo,
+                v.marca   AS vehiculo,
+                v.placa
+            FROM apoyo_combustibles.liquidaciones l
+            LEFT JOIN apoyo_combustibles.tiposapoyo ta ON ta.idTiposApoyo = l.tipoapoyoid
+            LEFT JOIN apoyo_combustibles.vehiculos   v  ON v.idVehiculos  = l.vehiculoid
+            WHERE l.usuarioid = ?
+              AND l.estado = 'aprobada'
+              AND l.comprobantecontableid IS NULL
+              {$filtroFecha}
+            ORDER BY l.fecha_liquidacion DESC";
+
+            $stmt = $this->connect->prepare($sqlLiq);
+            $stmt->execute($params);
             $liquidaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-            // Construir respuesta completa
-            $resultado = [
-                'CodigoCliente' => $usuario['CodigoCliente'],
-                'NombreUsuario' => $usuario['NombreUsuario'],
-                'Agencia' => $usuario['Agencia'],
-                'Puesto' => $usuario['Puesto'],
-                'PrimeraCuenta' => $usuario['PrimeraCuenta'],
-                'TotalLiquidaciones' => (float)$usuario['TotalLiquidaciones'],
-                'CantidadLiquidaciones' => (int)$usuario['CantidadLiquidaciones'],
-                'liquidaciones' => $liquidaciones
-            ];
-
-            return $this->res->ok('Detalle obtenido correctamente', $resultado);
+            return $this->res->ok('Detalle obtenido correctamente', [
+                'CodigoCliente'         => $usuario['CodigoCliente'],
+                'NombreUsuario'         => $usuario['NombreUsuario'],
+                'Agencia'               => $usuario['Agencia'],
+                'Puesto'                => $usuario['Puesto'],
+                'PrimeraCuenta'         => $usuario['PrimeraCuenta'],
+                'TotalLiquidaciones'    => (float) $usuario['TotalLiquidaciones'],
+                'CantidadLiquidaciones' => (int)   $usuario['CantidadLiquidaciones'],
+                'liquidaciones'         => $liquidaciones,
+            ]);
 
         } catch (Exception $e) {
             error_log("Error en obtenerDetalleLiquidacionesUsuario: " . $e->getMessage());
@@ -7643,96 +7724,101 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         }
     }
 
-    /**
-     * Asigna un comprobante contable a todas las liquidaciones aprobadas sin comprobante
-     *
-     * POST: combustible/asignarComprobanteMasivo
-     *
-     * @param object $datos {
-     *   numero_comprobante: string,
-     *   fecha_comprobante: string,
-     *   observaciones?: string
-     * }
-     */
+    // ════════════════════════════════════════════════════════════════════════════
+// MÉTODO 3: asignarComprobanteMasivo() — en CombustibleApiController
+// ════════════════════════════════════════════════════════════════════════════
+// CAMBIO: Filtrar las liquidaciones y el UPDATE por el aprobaciongerenciaid
+//         de la última solicitud aprobada, en lugar de tomar todas las que
+//         tienen comprobantecontableid IS NULL.
+//
+// Razón: Si existe una solicitud aprobada pendiente de comprobante Y al mismo
+//        tiempo hay nuevas liquidaciones aprobadas (sin solicitud), el UPDATE
+//        masivo no debe afectar a estas últimas — pertenecen a un ciclo futuro.
+// ════════════════════════════════════════════════════════════════════════════
+
     public function asignarComprobanteMasivo($datos)
     {
         try {
             $datos = $this->limpiarDatos($datos);
 
-            // Validaciones
             if (empty($datos->numero_comprobante)) {
                 return $this->res->fail('El número de comprobante es requerido');
             }
-
             if (empty($datos->fecha_comprobante)) {
                 return $this->res->fail('La fecha del comprobante es requerida');
             }
-
-            // Validación
             if (empty($datos->mes_anio_comprobante)) {
                 return $this->res->fail('El mes y año del comprobante son requeridos');
             }
-
             if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', $datos->mes_anio_comprobante)) {
                 return $this->res->fail('El formato de mes/año es inválido (esperado: YYYY-MM)');
             }
 
-// Convertir "YYYY-MM" → "YYYY-MM-01"
-            $mesAnioDate = $datos->mes_anio_comprobante . '-01';
-
-            // Validar que la fecha no sea futura
+            $mesAnioDate      = $datos->mes_anio_comprobante . '-01';
             $fechaComprobante = new \DateTime($datos->fecha_comprobante);
-            $hoy = new \DateTime();
-            $hoy->setTime(0, 0, 0);
+            $hoy              = (new \DateTime())->setTime(0, 0, 0);
 
             if ($fechaComprobante > $hoy) {
                 return $this->res->fail('La fecha del comprobante no puede ser futura');
             }
 
-            // Verificar que el número de comprobante no exista
-            $sqlVerificar = "SELECT idComprobantesContables 
-            FROM apoyo_combustibles.comprobantescontables 
-            WHERE numero_comprobante = ?";
-
+            // ── Verificar que no exista el número de comprobante ──────────────
+            $sqlVerificar = "SELECT idComprobantesContables
+                             FROM apoyo_combustibles.comprobantescontables
+                             WHERE numero_comprobante = ?";
             $stmt = $this->connect->prepare($sqlVerificar);
             $stmt->execute([$datos->numero_comprobante]);
-
             if ($stmt->fetch()) {
                 return $this->res->fail('El número de comprobante ya existe en el sistema');
             }
 
-            // Obtener todas las liquidaciones aprobadas sin comprobante
-            $sqlLiquidaciones = "SELECT 
-            idLiquidaciones,
-            monto
-        FROM apoyo_combustibles.liquidaciones
-        WHERE estado = 'aprobada'
-            AND comprobantecontableid IS NULL";
-
-            $stmt = $this->connect->prepare($sqlLiquidaciones);
+            // ── CAMBIO: Obtener el ID de la última solicitud APROBADA ─────────
+            // Solo se asignará comprobante a las liquidaciones de ESA solicitud.
+            $sqlAprobacion = "SELECT ag.idAprobacionesGerencia
+                              FROM apoyo_combustibles.aprobacionesgerencia ag
+                              INNER JOIN apoyo_combustibles.estadosaprobacion ea
+                                  ON ea.idEstadosAprobacion = ag.estadoaprobacionid
+                              WHERE ea.codigo = 'aprobada'
+                              ORDER BY ag.idAprobacionesGerencia DESC
+                              LIMIT 1";
+            $stmt = $this->connect->prepare($sqlAprobacion);
             $stmt->execute();
-            $liquidaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $idAprobacion = $stmt->fetchColumn();
+
+            if (!$idAprobacion) {
+                return $this->res->fail(
+                    'No se puede asignar el comprobante: no existe una solicitud aprobada por gerencia.'
+                );
+            }
+            $idAprobacion = (int) $idAprobacion;
+            // ── FIN CAMBIO ────────────────────────────────────────────────────
+
+            // ── Obtener liquidaciones a asignar (FILTRADO POR SOLICITUD) ──────
+            // CAMBIO: AND aprobaciongerenciaid = :idAprobacion
+            $sqlLiquidaciones = "SELECT idLiquidaciones, monto
+                                 FROM apoyo_combustibles.liquidaciones
+                                 WHERE estado = 'aprobada'
+                                   AND comprobantecontableid IS NULL
+                                   AND aprobaciongerenciaid = ?";    // ← CAMBIO
+            $stmt = $this->connect->prepare($sqlLiquidaciones);
+            $stmt->execute([$idAprobacion]);
+            $liquidaciones = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
             if (empty($liquidaciones)) {
-                return $this->res->fail('No hay liquidaciones aprobadas sin comprobante para asignar');
+                return $this->res->fail(
+                    'No hay liquidaciones pendientes de comprobante para la solicitud aprobada.'
+                );
             }
 
-            // Calcular monto total
             $montoTotal = array_sum(array_column($liquidaciones, 'monto'));
 
             $this->connect->beginTransaction();
 
-            // Crear el comprobante contable
-            $sqlComprobante = "INSERT INTO apoyo_combustibles.comprobantescontables (
-            numero_comprobante,
-            tipo,
-            fecha_comprobante,
-            mes_anio_comprobante,
-            monto_total,
-            observaciones,
-            registrado_por
-        ) VALUES (?, 'liquidacion', ?, ?, ?, ?, ?)";
-
+            // ── Crear comprobante contable ────────────────────────────────────
+            $sqlComprobante = "INSERT INTO apoyo_combustibles.comprobantescontables
+                                   (numero_comprobante, tipo, fecha_comprobante,
+                                    mes_anio_comprobante, monto_total, observaciones, registrado_por)
+                               VALUES (?, 'liquidacion', ?, ?, ?, ?, ?)";
             $stmt = $this->connect->prepare($sqlComprobante);
             $stmt->execute([
                 $datos->numero_comprobante,
@@ -7740,42 +7826,42 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 $mesAnioDate,
                 $montoTotal,
                 $datos->observaciones ?? null,
-                $this->idUsuario
+                $this->idUsuario,
             ]);
+            $idComprobante = (int) $this->connect->lastInsertId();
 
-            $idComprobante = $this->connect->lastInsertId();
-
-            // Actualizar todas las liquidaciones con el comprobante
-            $sqlActualizar = "UPDATE apoyo_combustibles.liquidaciones 
-            SET comprobantecontableid = ?
-            WHERE estado = 'aprobada'
-                AND comprobantecontableid IS NULL";
-
+            // ── Actualizar SOLO las liquidaciones de la solicitud aprobada ────
+            // CAMBIO: AND aprobaciongerenciaid = :idAprobacion
+            $sqlActualizar = "UPDATE apoyo_combustibles.liquidaciones
+                              SET comprobantecontableid = ?
+                              WHERE estado = 'aprobada'
+                                AND comprobantecontableid IS NULL
+                                AND aprobaciongerenciaid = ?";        // ← CAMBIO
             $stmt = $this->connect->prepare($sqlActualizar);
-            $stmt->execute([$idComprobante]);
-
+            $stmt->execute([$idComprobante, $idAprobacion]);
             $liquidacionesActualizadas = $stmt->rowCount();
 
             $this->connect->commit();
 
-            // Registrar en log (opcional)
             error_log(sprintf(
-                "Comprobante masivo asignado - ID: %d, Número: %s, Liquidaciones: %d, Monto: %.2f, Usuario: %s",
+                "Comprobante asignado — ID: %d | Número: %s | Solicitud aprobada: %d | Liq.: %d | Monto: %.2f | Usuario: %s",
                 $idComprobante,
                 $datos->numero_comprobante,
+                $idAprobacion,
                 $liquidacionesActualizadas,
                 $montoTotal,
                 $this->idUsuario
             ));
 
             return $this->res->ok('Comprobante asignado correctamente', [
-                'idComprobante' => $idComprobante,
-                'numero_comprobante' => $datos->numero_comprobante,
+                'idComprobante'            => $idComprobante,
+                'numero_comprobante'       => $datos->numero_comprobante,
                 'liquidacionesActualizadas' => $liquidacionesActualizadas,
-                'montoTotal' => $montoTotal
+                'montoTotal'               => $montoTotal,
+                'idAprobacion'             => $idAprobacion,
             ]);
 
-        } catch (Exception $e) {
+        } catch (\Exception $e) {
             if ($this->connect->inTransaction()) {
                 $this->connect->rollBack();
             }
@@ -7788,82 +7874,235 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
 // MÉTODOS AUXILIARES PRIVADOS
 // ============================================================================
 
-    /**
-     * Obtiene liquidaciones aprobadas sin comprobante agrupadas por usuario
-     *
-     * @return array
-     */
-    private function _obtenerLiquidacionesSinComprobante()
+
+// ════════════════════════════════════════════════════════════════════════════
+// MÉTODO 2: _obtenerLiquidacionesSinComprobante() — en EnvioPagoLiquidacionesHelper
+// ════════════════════════════════════════════════════════════════════════════
+// CAMBIO: En la query principal del paso 1 (liquidaciones sin comprobante),
+//         agregar JOIN a aprobacionesgerencia + estadosaprobacion para filtrar
+//         SOLO las liquidaciones vinculadas a una solicitud APROBADA.
+//
+// Razón: El módulo Comprobantes solo debe mostrar las liquidaciones del ciclo
+//        actual (aprobado). Las nuevas liquidaciones (sin solicitud, o con
+//        solicitud pendiente/rechazada) NO deben aparecer aquí todavía.
+// ════════════════════════════════════════════════════════════════════════════
+
+    private function _obtenerLiquidacionesSinComprobante(): array
     {
+        $anio = (int) date('Y');
+
+        // ── 1. Liquidaciones sin comprobante de solicitud APROBADA ──────────
+        // CAMBIO: Agregado INNER JOIN a aprobacionesgerencia y estadosaprobacion
+        //         para filtrar solo las del ciclo aprobado.
         $sql = "SELECT
+            l.idLiquidaciones,
+            l.usuarioid,
+            l.aprobaciongerenciaid,
+            l.numero_factura,
+            l.monto,
+            l.fecha_liquidacion,
             cli.CodigoCliente,
-            ag.nombre AS Agencia,
-            pu.nombre AS Puesto,
+            dtp.nombres  AS NombreUsuario,
+            us.idAgencia AS idAgenciaUsuario,
+            us.idPuesto  AS idPuestoUsuario,
+            ag_usr.nombre AS AgenciaUsuario,
+            pu.nombre     AS PuestoUsuario,
             (
                 SELECT cap2.NumeroCuenta
                 FROM asociado_t24.ccomndatoscaptaciones AS cap2
                 WHERE cap2.Cliente = cli.CodigoCliente
-                    AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
+                  AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
                 ORDER BY cap2.NumeroCuenta
                 LIMIT 1
-            ) AS PrimeraCuenta,    
-            dtp.nombres AS NombreUsuario,
-            us.idUsuarios AS usuarioid,
-            SUM(l.monto) AS TotalLiquidaciones,
-            COUNT(l.idLiquidaciones) AS CantidadLiquidaciones,
-            GROUP_CONCAT(l.numero_factura ORDER BY l.numero_factura SEPARATOR ', ') AS FacturasIncluidas,
-            pg.monto_anual AS PresupuestoAnual,
-            pg.anio AS AnioPresupuesto
-        FROM
-            apoyo_combustibles.liquidaciones AS l
-            LEFT JOIN dbintranet.usuarios AS us ON l.usuarioid = us.idUsuarios
-            LEFT JOIN dbintranet.datospersonales AS dtp ON dtp.idDatosPersonales = us.idDatosPersonales
-            LEFT JOIN asociado_t24.comndatosclientes AS cli ON dtp.dpi = cli.Dpi
-            INNER JOIN dbintranet.agencia AS ag ON ag.idAgencia = us.idAgencia
-            INNER JOIN dbintranet.puesto AS pu ON pu.idPuesto = us.idPuesto
-            LEFT JOIN apoyo_combustibles.presupuestogeneral AS pg 
-                ON pg.agenciaid = us.idAgencia 
-                AND pg.puestoid = us.idPuesto
-                AND pg.anio = YEAR(CURDATE())
-                AND pg.activo = 1
-        WHERE
-            l.estado = 'aprobada'
-            AND l.comprobantecontableid IS NULL
-        GROUP BY
-            cli.CodigoCliente,
-            dtp.nombres,
-            ag.nombre,
-            pu.nombre,
-            us.idUsuarios,
-            pg.monto_anual,
-            pg.monto_diario,
-            pg.anio
-        HAVING
-            PrimeraCuenta IS NOT NULL
-        ORDER BY
-            ag.nombre,
-            dtp.nombres";
+            ) AS PrimeraCuenta
+        FROM apoyo_combustibles.liquidaciones AS l
+ 
+        -- CAMBIO: JOIN a la solicitud y verificar que esté aprobada
+        INNER JOIN apoyo_combustibles.aprobacionesgerencia apbg
+            ON apbg.idAprobacionesGerencia = l.aprobaciongerenciaid
+        INNER JOIN apoyo_combustibles.estadosaprobacion ea_sol
+            ON ea_sol.idEstadosAprobacion = apbg.estadoaprobacionid
+            AND ea_sol.codigo = 'aprobada'
+        -- FIN CAMBIO
+ 
+        LEFT JOIN dbintranet.usuarios AS us
+            ON us.idUsuarios = l.usuarioid
+        LEFT JOIN dbintranet.datospersonales AS dtp
+            ON dtp.idDatosPersonales = us.idDatosPersonales
+        LEFT JOIN asociado_t24.comndatosclientes AS cli
+            ON cli.Dpi = dtp.dpi
+        INNER JOIN dbintranet.agencia AS ag_usr ON ag_usr.idAgencia = us.idAgencia
+        INNER JOIN dbintranet.puesto  AS pu      ON pu.idPuesto     = us.idPuesto
+        WHERE l.estado = 'aprobada'
+          AND l.comprobantecontableid IS NULL
+        HAVING PrimeraCuenta IS NOT NULL
+        ORDER BY l.usuarioid, l.fecha_liquidacion ASC";
 
         $stmt = $this->connect->prepare($sql);
         $stmt->execute();
-        $resultados = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $liquidaciones = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
-        // Convertir valores numéricos
-        return array_map(function ($row) {
-            return [
-                'CodigoCliente' => $row['CodigoCliente'],
-                'Agencia' => $row['Agencia'],
-                'Puesto' => $row['Puesto'],
-                'PrimeraCuenta' => $row['PrimeraCuenta'],
-                'NombreUsuario' => $row['NombreUsuario'],
-                'usuarioid' => $row['usuarioid'],
-                'TotalLiquidaciones' => (float)$row['TotalLiquidaciones'],
-                'CantidadLiquidaciones' => (int)$row['CantidadLiquidaciones'],
-                'FacturasIncluidas' => $row['FacturasIncluidas'],
-                'MontoAnual' => $row['PresupuestoAnual'],
-                'AnioPresupuesto' => $row['AnioPresupuesto'],
+        if (empty($liquidaciones)) return [];
+
+        // ── 2. UCFs del año para los usuarios involucrados (sin cambios) ────
+        $usuariosIds  = array_values(array_unique(array_column($liquidaciones, 'usuarioid')));
+        $placeholders = implode(',', array_fill(0, count($usuariosIds), '?'));
+
+        $sqlUcf = "SELECT
+            ucf.idUsuariosControlFechas,
+            ucf.usuarioid,
+            ucf.agenciaid,
+            ucf.puestoid,
+            ucf.fecha_ingreso,
+            ucf.fecha_egreso,
+            ucf.es_nuevo,
+            ucf.porcentaje_presupuesto,
+            ucf.dias_presupuesto,
+            ag.nombre  AS agencia,
+            pu.nombre  AS puesto,
+            pg.monto_mensual
+        FROM apoyo_combustibles.usuarioscontrolfechas AS ucf
+        INNER JOIN dbintranet.agencia AS ag ON ag.idAgencia = ucf.agenciaid
+        INNER JOIN dbintranet.puesto  AS pu ON pu.idPuesto  = ucf.puestoid
+        LEFT JOIN apoyo_combustibles.presupuestogeneral AS pg
+            ON  pg.agenciaid = ucf.agenciaid
+            AND pg.puestoid  = ucf.puestoid
+            AND pg.anio      = ?
+            AND pg.activo    = 1
+        WHERE ucf.usuarioid IN ($placeholders)
+          AND ucf.activo = 1
+          AND (
+              YEAR(ucf.fecha_ingreso) = ?
+              OR ucf.fecha_egreso IS NULL
+              OR YEAR(ucf.fecha_egreso) = ?
+          )
+        ORDER BY ucf.usuarioid, ucf.fecha_ingreso ASC";
+
+        $stmt = $this->connect->prepare($sqlUcf);
+        $stmt->execute(array_merge([$anio], $usuariosIds, [$anio, $anio]));
+        $ucfRows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        $ucfPorUsuario = [];
+        foreach ($ucfRows as $ucf) {
+            $ucfPorUsuario[$ucf['usuarioid']][] = $ucf;
+        }
+
+        // ── 3. Asignar cada liquidación a su UCF (sin cambios) ───────────────
+        $grupos = [];
+
+        foreach ($liquidaciones as $liq) {
+            $uid   = $liq['usuarioid'];
+            $fecha = substr($liq['fecha_liquidacion'], 0, 10);
+            $ucfs  = $ucfPorUsuario[$uid] ?? [];
+
+            $ucfAsignado = null;
+            foreach ($ucfs as $ucf) {
+                $finEfectivo = $ucf['fecha_egreso'] ?? date('Y-12-31');
+                if ($fecha >= $ucf['fecha_ingreso'] && $fecha <= $finEfectivo) {
+                    $ucfAsignado = $ucf;
+                    break;
+                }
+            }
+
+            if ($ucfAsignado) {
+                $clave = $uid . '_ucf_' . $ucfAsignado['idUsuariosControlFechas'];
+                if (!isset($grupos[$clave])) {
+                    $grupos[$clave] = [
+                        'usuarioid'     => $uid,
+                        'ucfid'         => (int) $ucfAsignado['idUsuariosControlFechas'],
+                        'idAgencia'     => (int) $ucfAsignado['agenciaid'],
+                        'idPuesto'      => (int) $ucfAsignado['puestoid'],
+                        'Agencia'       => $ucfAsignado['agencia'],
+                        'Puesto'        => $ucfAsignado['puesto'],
+                        'CodigoCliente' => $liq['CodigoCliente'],
+                        'NombreUsuario' => $liq['NombreUsuario'],
+                        'PrimeraCuenta' => $liq['PrimeraCuenta'],
+                        'tipo_fila'     => 'ucf',
+                        'ucf_data'      => $ucfAsignado,
+                        'liquidaciones' => [],
+                    ];
+                }
+            } else {
+                $clave = $uid . '_sin_ucf';
+                if (!isset($grupos[$clave])) {
+                    $grupos[$clave] = [
+                        'usuarioid'     => $uid,
+                        'ucfid'         => null,
+                        'idAgencia'     => (int) $liq['idAgenciaUsuario'],
+                        'idPuesto'      => (int) $liq['idPuestoUsuario'],
+                        'Agencia'       => $liq['AgenciaUsuario'],
+                        'Puesto'        => $liq['PuestoUsuario'],
+                        'CodigoCliente' => $liq['CodigoCliente'],
+                        'NombreUsuario' => $liq['NombreUsuario'],
+                        'PrimeraCuenta' => $liq['PrimeraCuenta'],
+                        'tipo_fila'     => 'sin_ucf',
+                        'ucf_data'      => null,
+                        'liquidaciones' => [],
+                    ];
+                }
+            }
+
+            $grupos[$clave]['liquidaciones'][] = [
+                'numero_factura'    => $liq['numero_factura'],
+                'monto'             => (float) $liq['monto'],
+                'fecha_liquidacion' => $liq['fecha_liquidacion'],
             ];
-        }, $resultados);
+        }
+
+        // ── 4. Construir filas finales (sin cambios) ─────────────────────────
+        $rangoHelper = new \App\combustibleApi\Helpers\PresupuestoRangoHelper($this->connect);
+        $registros   = [];
+
+        foreach ($grupos as $grupo) {
+            $ucfData = $grupo['ucf_data'];
+
+            if ($ucfData && (float) ($ucfData['monto_mensual'] ?? 0) > 0) {
+                $inicioRango  = $ucfData['fecha_ingreso'];
+                $finRango     = $ucfData['fecha_egreso'] ?? "{$anio}-12-31";
+                $periodoRango = [
+                    'monto_mensual'          => (float) $ucfData['monto_mensual'],
+                    'es_nuevo'               => (bool)  $ucfData['es_nuevo'],
+                    'dias_presupuesto'       => (int)   $ucfData['dias_presupuesto'],
+                    'porcentaje_presupuesto' => (int)   $ucfData['porcentaje_presupuesto'],
+                    'inicio_efectivo'        => $inicioRango,
+                ];
+                $montoAnual = round(
+                    $rangoHelper->calcularPorRango($periodoRango, $inicioRango, $finRango), 2
+                );
+            } else {
+                $presupuestoHelper = new \App\combustibleApi\Helpers\PresupuestoAnualHelper(
+                    $this->connect, $grupo['usuarioid'], $grupo['idAgencia'], $grupo['idPuesto']
+                );
+                $presupuesto = $presupuestoHelper->obtener($anio);
+                $montoAnual  = $presupuesto ? round((float) $presupuesto['monto_anual'], 2) : null;
+            }
+
+            $totalMonto        = array_sum(array_column($grupo['liquidaciones'], 'monto'));
+            $facturas          = implode(', ', array_column($grupo['liquidaciones'], 'numero_factura'));
+            $cantLiquidaciones = count($grupo['liquidaciones']);
+
+            $registros[] = [
+                'CodigoCliente'         => $grupo['CodigoCliente'],
+                'Agencia'               => $grupo['Agencia'],
+                'Puesto'                => $grupo['Puesto'],
+                'PrimeraCuenta'         => $grupo['PrimeraCuenta'],
+                'NombreUsuario'         => $grupo['NombreUsuario'],
+                'usuarioid'             => $grupo['usuarioid'],
+                'ucfid'                 => $grupo['ucfid'],
+                'tipo_fila'             => $grupo['tipo_fila'],
+                'TotalLiquidaciones'    => round($totalMonto, 2),
+                'CantidadLiquidaciones' => $cantLiquidaciones,
+                'FacturasIncluidas'     => $facturas,
+                'MontoAnual'            => $montoAnual,
+                'AnioPresupuesto'       => $anio,
+            ];
+        }
+
+        usort($registros, fn($a, $b) =>
+            [$a['Agencia'], $a['NombreUsuario']] <=> [$b['Agencia'], $b['NombreUsuario']]
+        );
+
+        return $registros;
     }
 
     //! MANTENIMIENTO LIQUIDACIONES
@@ -7891,12 +8130,22 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
      * una fila independiente en la tabla del frontend.
      *
      * GET: combustible/listarMantenimientoPorPeriodos
+     * GET: combustible/listarMantenimientoPorPeriodos?modo_acumulado=true
+     *
+     * @param bool modo_acumulado  Si true, los sub-períodos de prueba aún activos
+     *                             muestran el presupuesto acumulado hasta hoy en lugar
+     *                             del total del período completo.
      */
     public function listarMantenimientoPorPeriodos()
     {
         try {
             $this->_inicializarHelperMantenimiento();
             $h = $this->mantHelper;
+
+            $modoAcumulado = filter_var(
+                $_GET['modo_acumulado'] ?? false,
+                FILTER_VALIDATE_BOOLEAN
+            );
 
             // ── Rango de análisis ─────────────────────────────────────────────
             [$fechaDesde, $fechaHasta, $anio] = $h->rangoAnalisis();
@@ -7909,8 +8158,18 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
             $datosUsuarios = $h->obtenerDatosMultiplesUsuarios($usuariosIds);
 
             // ── 3. Liquidaciones de todos los usuarios en el rango (una query) ─
+            // Se expande el inicio al fecha_ingreso más temprana de los UCF para
+            // capturar liquidaciones de períodos de prueba que empezaron antes
+            // del rango de análisis (ej: prueba Ene–Feb vista desde Feb).
+            $fechaLiqDesde = $fechaDesde;
+            foreach ($periodos as $p) {
+                if ($p['inicio_efectivo'] < $fechaLiqDesde) {
+                    $fechaLiqDesde = $p['inicio_efectivo'];
+                }
+            }
+
             $liquidacionesAgrupadas = $h->obtenerLiquidacionesRangoGlobal(
-                $usuariosIds, $fechaDesde, $fechaHasta
+                $usuariosIds, $fechaLiqDesde, $fechaHasta
             );
 
             // ── 3.1 Filtrar solo usuarios con al menos una liquidación ────────
@@ -7923,6 +8182,12 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
             $usuariosIds   = array_values(array_unique(array_column($periodos, 'usuarioid')));
             $datosUsuarios = array_intersect_key($datosUsuarios, array_flip($usuariosIds));
 
+            // ── 3.2 Extraordinarios por UCF (una query para todos) ────────────
+            $ucfIds = array_values(array_unique(
+                array_map('intval', array_column($periodos, 'idUsuariosControlFechas'))
+            ));
+            $extraordinariosPorUCF = $h->obtenerExtaordinariosMultiplesUCFs($ucfIds);
+
             // ── 4. Construir filas por sub-período ────────────────────────────
             $registros = [];
 
@@ -7931,12 +8196,17 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 $usuario = $datosUsuarios[$uid] ?? null;
                 if (!$usuario) continue;
 
+                $ucfId                = (int) $periodo['idUsuariosControlFechas'];
+                $montoExtraordinarios = $extraordinariosPorUCF[$ucfId] ?? 0.0;
+
                 $subPeriodos = $h->dividirEnSubPeriodos($periodo, $fechaDesde, $fechaHasta);
 
                 foreach ($subPeriodos as $sub) {
                     $registros[] = $h->construirFilaPeriodo(
                         $periodo, $sub, $usuario,
-                        $liquidacionesAgrupadas[$uid] ?? []
+                        $liquidacionesAgrupadas[$uid] ?? [],
+                        $montoExtraordinarios,
+                        $modoAcumulado  // ← nuevo parámetro
                     );
                 }
             }
@@ -7978,6 +8248,7 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 'registros'      => $registros,
                 'total'          => count($registros),
                 'rango_analisis' => ['desde' => $fechaDesde, 'hasta' => $fechaHasta],
+                'modo_acumulado' => $modoAcumulado,
             ]);
 
         } catch (Exception $e) {
@@ -8024,25 +8295,49 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 $periodos = $h->generarPeriodoGenerico($usuario, $fechaDesde, $fechaHasta);
             }
 
-            // ── Liquidaciones del usuario en el rango completo ────────────────
+            // ── Liquidaciones del usuario expandiendo al inicio real más temprano ─
+            // Necesario para capturar liquidaciones de períodos de prueba que
+            // empezaron antes del rango de análisis (ej: prueba Ene–Feb desde Feb).
+            $fechaLiqDesde = $fechaDesde;
+            foreach ($periodos as $p) {
+                if ($p['inicio_efectivo'] < $fechaLiqDesde) {
+                    $fechaLiqDesde = $p['inicio_efectivo'];
+                }
+            }
+
             $todasLiquidaciones = $h->obtenerLiquidacionesEnRango(
-                $datos->usuarioid, $fechaDesde, $fechaHasta
+                $datos->usuarioid, $fechaLiqDesde, $fechaHasta
             );
+
+            // ── Extraordinarios por UCF ───────────────────────────────────────
+            $ucfIds = array_values(array_unique(
+                array_map('intval', array_column($periodos, 'idUsuariosControlFechas'))
+            ));
+            $extraordinariosPorUCF = $h->obtenerExtaordinariosMultiplesUCFs($ucfIds);
 
             // ── Construir períodos detalle con división de sub-períodos ────────
             $periodosDetalle = [];
 
             foreach ($periodos as $periodo) {
+                $ucfId                = (int) $periodo['idUsuariosControlFechas'];
+                $montoExtraordinarios = $extraordinariosPorUCF[$ucfId] ?? 0.0;
+
                 $subPeriodos = $h->dividirEnSubPeriodos($periodo, $fechaDesde, $fechaHasta);
 
                 foreach ($subPeriodos as $sub) {
                     $fila = $h->construirFilaPeriodo(
-                        $periodo, $sub, [], $todasLiquidaciones
+                        $periodo, $sub, [], $todasLiquidaciones,
+                        $montoExtraordinarios
                     );
 
-                    // Agregar el detalle de liquidaciones al período
+                    // Usar inicio_real/fin_real para mostrar TODAS las liquidaciones
+                    // del sub-período completo, incluyendo las anteriores al rango
+                    // de análisis (ej: las 5 de enero en una prueba Ene–Feb).
+                    $inicioFiltroLiq = $sub['inicio_real'] ?? $sub['inicio'];
+                    $finFiltroLiq    = $sub['fin_real']    ?? $sub['fin'];
+
                     $fila['liquidaciones'] = $h->filtrarLiquidacionesPorRango(
-                        $todasLiquidaciones, $sub['inicio'], $sub['fin']
+                        $todasLiquidaciones, $inicioFiltroLiq, $finFiltroLiq
                     );
 
                     // Quitar campos de usuario (van en el encabezado del modal)
@@ -8191,7 +8486,7 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
     }
 
 // ============================================================================
-// ENDPOINTS - ENVÍO Y APROBACIÓN DE PAGO DE LIQUIDACIONES
+//? ENDPOINTS - ENVÍO Y APROBACIÓN DE PAGO DE LIQUIDACIONES
 // ============================================================================
 // Agregar estas propiedades y métodos al controller existente
 // ============================================================================
@@ -8261,38 +8556,63 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
             $this->_inicializarHelperEnvioPago();
             $h = $this->envioPagoHelper;
 
-            // ── Año de consulta: regla antes-del-15-de-enero ─────────────────
             $anioGet = isset($_GET['anio']) && is_numeric($_GET['anio'])
                 ? (int) $_GET['anio']
                 : null;
             $anio = $this->_resolverAnioLiquidaciones($anioGet);
 
-            // ── 1. Comprobantes del año → definen las columnas dinámicas ──────
+            // ── 1. Comprobantes del año ───────────────────────────────────────
             $comprobantes = $h->obtenerComprobantesDelAnio($anio);
 
-            // ── 2. Usuarios con liquidaciones en el año ───────────────────────
+            // ── 2. Usuarios con liquidaciones ────────────────────────────────
             $datosUsuarios = $h->obtenerUsuariosConLiquidaciones($anio);
 
             if (empty($datosUsuarios)) {
                 return $this->res->ok('No hay liquidaciones registradas para el año indicado', [
-                    'anio'         => $anio,
-                    'comprobantes' => $comprobantes,
-                    'registros'    => [],
-                    'total'        => 0,
+                    'anio'               => $anio,
+                    'comprobantes'       => $comprobantes,
+                    'registros'          => [],
+                    'total'              => 0,
+                    'porcentaje_ejercicio' => 0,
                 ]);
             }
 
             $usuariosIds = array_keys($datosUsuarios);
 
-            // ── 3. Periodos UCF de todos los usuarios ─────────────────────────
+            // ── 3. Periodos UCF ───────────────────────────────────────────────
             $periodosPorUsuario = $h->obtenerPeriodosResumenPorUsuarios($usuariosIds, $anio);
 
-            // ── 4. Liquidaciones de todos los usuarios en el año ──────────────
+            // ── 3b. Fallback ──────────────────────────────────────────────────
+            $sinPeriodos = array_values(array_diff(
+                $usuariosIds,
+                array_keys($periodosPorUsuario)
+            ));
+            if (!empty($sinPeriodos)) {
+                $fallback           = $h->obtenerPeriodoFallbackPorUsuarios($sinPeriodos, $anio);
+                $periodosPorUsuario = array_merge($periodosPorUsuario, $fallback);
+            }
+
+            // ── 4. Liquidaciones ──────────────────────────────────────────────
             $liquidacionesPorUsuario = $h->obtenerLiquidacionesAgrupadas($usuariosIds, $anio);
 
-            // ── 5. Construir una fila por usuario ─────────────────────────────
-            $registros = [];
+            // ── 5. Extraordinarios ────────────────────────────────────────────
+            $ucfIds = [];
+            foreach ($periodosPorUsuario as $periodos) {
+                foreach ($periodos as $p) {
+                    if (!empty($p['idUsuariosControlFechas'])) {
+                        $ucfIds[] = (int) $p['idUsuariosControlFechas'];
+                    }
+                }
+            }
+            $extraordinariosPorUcf = !empty($ucfIds)
+                ? $h->obtenerExtaordinariosAgrupados($ucfIds, $anio)
+                : [];
 
+            // ── 6. Porcentaje de ejercicio ────────────────────────────────────
+            $porcentajeEjercicio = $h->obtenerPorcentajeConfiguracion();
+
+            // ── 7. Construir filas ────────────────────────────────────────────
+            $registros = [];
             foreach ($datosUsuarios as $uid => $datosUsuario) {
                 $registros[] = $h->construirFilaUsuario(
                     $uid,
@@ -8300,11 +8620,13 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                     $periodosPorUsuario[$uid]      ?? [],
                     $liquidacionesPorUsuario[$uid] ?? [],
                     $comprobantes,
-                    $anio
+                    $anio,
+                    $extraordinariosPorUcf,
+                    $porcentajeEjercicio
                 );
             }
 
-            // ── 6. Ordenar: sobregiro primero, luego agencia y nombre ─────────
+            // ── 8. Ordenar ────────────────────────────────────────────────────
             usort($registros, function ($a, $b) {
                 if ($a['tiene_sobregiro'] !== $b['tiene_sobregiro']) {
                     return $a['tiene_sobregiro'] ? -1 : 1;
@@ -8315,10 +8637,11 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
             });
 
             return $this->res->ok('Registros de envío y pago obtenidos correctamente', [
-                'anio'         => $anio,
-                'comprobantes' => $comprobantes,
-                'registros'    => $registros,
-                'total'        => count($registros),
+                'anio'               => $anio,
+                'comprobantes'       => $comprobantes,
+                'registros'          => $registros,
+                'total'              => count($registros),
+                'porcentaje_ejercicio' => $porcentajeEjercicio,
             ]);
 
         } catch (\Exception $e) {
@@ -8327,12 +8650,13 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         }
     }
 
+
     // -------------------------------------------------------------------------
 
     /**
      * Obtiene el detalle completo de un usuario para el modal:
      * sus periodos UCF con las liquidaciones de cada uno, agrupadas
-     * por comprobante/mes.
+     * por comprobante/mes. Incluye bajas y registros extraordinarios.
      *
      * POST: combustible/obtenerDetalleEnvioPago
      *
@@ -8352,13 +8676,11 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 return $this->res->fail('El ID de usuario es requerido');
             }
 
-            // ── Año de consulta: regla antes-del-15-de-enero ─────────────────
             $anioPost = isset($datos->anio) && is_numeric($datos->anio)
                 ? (int) $datos->anio
                 : null;
             $anio = $this->_resolverAnioLiquidaciones($anioPost);
 
-            // ── Datos generales del usuario ───────────────────────────────────
             $datosUsuarios = $h->obtenerUsuariosConLiquidaciones($anio);
             $datosUsuario  = $datosUsuarios[$datos->usuarioid] ?? null;
 
@@ -8368,32 +8690,56 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 );
             }
 
-            // ── Comprobantes del año (columnas del modal) ─────────────────────
             $comprobantes = $h->obtenerComprobantesDelAnio($anio);
 
-            // ── Periodos UCF del usuario ──────────────────────────────────────
             $periodosPorUsuario = $h->obtenerPeriodosResumenPorUsuarios(
                 [$datos->usuarioid], $anio
             );
             $periodosUsuario = $periodosPorUsuario[$datos->usuarioid] ?? [];
 
-            // ── Todas las liquidaciones del usuario en el año ─────────────────
-            $liquidaciones = $h->obtenerLiquidacionesPorUsuario($datos->usuarioid, $anio);
+            if (empty($periodosUsuario)) {
+                $fallback        = $h->obtenerPeriodoFallbackPorUsuarios([$datos->usuarioid], $anio);
+                $periodosUsuario = $fallback[$datos->usuarioid] ?? [];
+            }
 
-            // ── Construir el detalle por sub-periodo ──────────────────────────
+            $liquidaciones         = $h->obtenerLiquidacionesPorUsuario($datos->usuarioid, $anio);
+            $extraordinariosPorUcf = $h->obtenerExtaordinariosPorUsuario($datos->usuarioid, $anio);
+            $porcentajeEjercicio   = $h->obtenerPorcentajeConfiguracion();
+
             $periodosDetalle = $h->construirDetalleUsuario(
                 $periodosUsuario,
                 $liquidaciones,
                 $comprobantes,
-                $anio
+                $anio,
+                $extraordinariosPorUcf
             );
 
-            // ── Totales globales del usuario ──────────────────────────────────
-            $totalEjecutado  = array_sum(array_column($periodosDetalle, 'subtotal_liquidado'));
+            $totalEjecutado   = array_sum(array_column($periodosDetalle, 'subtotal_ejecutado'));
             $totalPresupuesto = array_sum(array_column($periodosDetalle, 'presupuesto_asignado'));
+            $totalDeBaja      = array_sum(array_column($periodosDetalle, 'total_de_baja'));
+            $totalExtras      = array_sum(array_column($periodosDetalle, 'total_extraordinarios'));
+
+            $diferencia         = $totalPresupuesto - $totalEjecutado;
+            $resultadoEjercicio = $diferencia > 0
+                ? $diferencia * ($porcentajeEjercicio / 100)
+                : $diferencia;
+
+            // ── Lista consolidada de extraordinarios (para tabla al final del modal) ──
+            $todosExtaordinarios = [];
+            foreach ($periodosDetalle as $pd) {
+                if (!empty($pd['extraordinarios'])) {
+                    foreach ($pd['extraordinarios'] as $ext) {
+                        $todosExtaordinarios[] = array_merge($ext, [
+                            'periodo_tipo'   => $pd['tipo_periodo'],
+                            'periodo_inicio' => $pd['fecha_inicio'],
+                            'periodo_fin'    => $pd['fecha_fin'],
+                            'puesto'         => $pd['puesto'],
+                        ]);
+                    }
+                }
+            }
 
             return $this->res->ok('Detalle de envío y pago obtenido correctamente', [
-                // Encabezado del modal
                 'usuarioid'      => $datos->usuarioid,
                 'CodigoCliente'  => $datosUsuario['CodigoCliente'],
                 'NombreUsuario'  => $datosUsuario['NombreUsuario'],
@@ -8401,21 +8747,22 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 'agencia'        => $datosUsuario['agencia'],
                 'puesto_actual'  => $datosUsuario['puesto_actual'],
                 'estado_usuario' => $datosUsuario['estado_usuario'],
-
-                // Columnas dinámicas disponibles
                 'comprobantes'   => $comprobantes,
                 'anio'           => $anio,
-
-                // Periodos con sus liquidaciones
                 'periodos'       => $periodosDetalle,
                 'total_periodos' => count($periodosDetalle),
-
-                // Resumen financiero global
+                'todos_extraordinarios' => $todosExtaordinarios,
                 'resumen' => [
                     'presupuesto_asignado'  => round($totalPresupuesto, 2),
                     'presupuesto_ejecutado' => round($totalEjecutado, 2),
-                    'sobregiro'             => round(max(0, $totalEjecutado - $totalPresupuesto), 2),
-                    'tiene_sobregiro'       => $totalEjecutado > $totalPresupuesto,
+                    'total_de_baja'         => round($totalDeBaja, 2),
+                    'total_extraordinarios' => round($totalExtras, 2),
+                    'diferencia'            => round($diferencia, 2),
+                    'porcentaje_ejercicio'  => $porcentajeEjercicio,
+                    'resultado_ejercicio'   => round($resultadoEjercicio, 2),
+                    'tiene_resultado_favor' => $diferencia > 0,
+                    'sobregiro'             => round(max(0, -$diferencia), 2),
+                    'tiene_sobregiro'       => $diferencia < 0,
                 ],
             ]);
 
@@ -8463,7 +8810,7 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
     }
 
 // ============================================================================
-// REGISTROS EXTRAORDINARIOS (complementos de período de prueba)
+//? REGISTROS EXTRAORDINARIOS (complementos de período de prueba)
 // ============================================================================
 
     /**
@@ -8529,23 +8876,34 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
     }
 
 // ----------------------------------------------------------------------------
-
     /**
      * Calcula el resumen del período de prueba de un usuario:
      * presupuesto asignado, consumo real y diferencia pendiente.
-     * Contabilidad usa esto para saber qué monto extraordinario registrar.
      *
-     * GET: combustible/obtenerResumenPruebaPorUsuario?usuarioid=XXX
+     * Modo acumulado: si el empleado aún está en prueba, calcula solo
+     * hasta la fecha actual en lugar del período completo.
+     * Esto permite saber cuánto debería haber recibido hasta hoy.
+     *
+     * GET: combustible/obtenerResumenPruebaPorUsuario?usuarioid=XXX&modo_acumulado=true
+     *
+     * @param int  usuarioid      ID del usuario
+     * @param bool modo_acumulado true = calcula hasta hoy si sigue en prueba
      */
     public function obtenerResumenPruebaPorUsuario()
     {
         try {
-            $usuarioid = $_GET['usuarioid'] ?? null;
+            $usuarioid     = $_GET['usuarioid']      ?? null;
+            $modoAcumulado = filter_var(
+                $_GET['modo_acumulado'] ?? false,
+                FILTER_VALIDATE_BOOLEAN
+            );
+
             if (empty($usuarioid)) {
                 return $this->res->fail('El ID de usuario es requerido');
             }
 
             $anio = (int) date('Y');
+            $hoy  = date('Y-m-d');
 
             // UCF del período de prueba
             $sql = "SELECT
@@ -8582,28 +8940,53 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 return $this->res->info('El usuario no tiene período de prueba registrado');
             }
 
-            // Calcular fechas del período de prueba
+            // Fechas del período de prueba
             $fechaInicio    = $ucf['fecha_ingreso'];
             $fechaFinPrueba = (new \DateTime($fechaInicio))
                 ->modify("+{$ucf['dias_presupuesto']} days")
                 ->modify('-1 day')
                 ->format('Y-m-d');
 
-            // Presupuesto asignado al período de prueba
-            $porcentaje       = $ucf['porcentaje_presupuesto'] / 100;
-            $montoMensual     = (float) $ucf['monto_mensual'];
-            $presupuestoAsignado = $this->_calcularPresupuestoPruebaRangoMensual(
-                $fechaInicio, $fechaFinPrueba, $montoMensual, $porcentaje
-            );
+            $montoMensual = (float) $ucf['monto_mensual'];
+            $porcentaje   = $ucf['porcentaje_presupuesto'] / 100;
+            $enPrueba     = $hoy <= $fechaFinPrueba;
+
+            // Presupuesto asignado
+            // Si modo_acumulado=true y el empleado aún está en prueba → calcular hasta hoy.
+            // Si ya terminó el período, siempre se calcula el total completo.
+            $helper = new PresupuestoRangoHelper($this->connect);
+
+            if ($modoAcumulado && $enPrueba) {
+                $presupuestoAsignado = $helper->calcularRangoPruebaAcumulado(
+                    $fechaInicio,
+                    $fechaFinPrueba,
+                    $montoMensual,
+                    $porcentaje,
+                    $hoy
+                );
+            } else {
+                $presupuestoAsignado = $helper->calcularRangoPrueba(
+                    $fechaInicio,
+                    $fechaFinPrueba,
+                    $montoMensual,
+                    $porcentaje
+                );
+            }
 
             // Consumo real del período de prueba
+            // En modo acumulado se limita hasta hoy; si ya terminó, usa el fin real.
+            $fechaLimiteLiquidaciones = ($modoAcumulado && $enPrueba)
+                ? $hoy . ' 23:59:59'
+                : $fechaFinPrueba . ' 23:59:59';
+
             $sqlConsumo = "SELECT COALESCE(SUM(monto), 0)
                        FROM apoyo_combustibles.liquidaciones
                        WHERE usuarioid = ?
                          AND estado NOT IN ('eliminada', 'rechazada')
                          AND fecha_liquidacion BETWEEN ? AND ?";
+
             $stmt = $this->connect->prepare($sqlConsumo);
-            $stmt->execute([$usuarioid, $fechaInicio, $fechaFinPrueba . ' 23:59:59']);
+            $stmt->execute([$usuarioid, $fechaInicio, $fechaLimiteLiquidaciones]);
             $consumoReal = (float) $stmt->fetchColumn();
 
             // Registros extraordinarios ya registrados para este UCF
@@ -8613,11 +8996,12 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                        AND ucfid     = ?
                        AND activo    = 1
                        AND estado   != 'cancelado'";
+
             $stmt = $this->connect->prepare($sqlExtra);
             $stmt->execute([$usuarioid, $ucf['idUsuariosControlFechas']]);
             $yaRegistrado = (float) $stmt->fetchColumn();
 
-            $diferencia       = max(0, $presupuestoAsignado - $consumoReal);
+            $diferencia         = max(0, $presupuestoAsignado - $consumoReal);
             $pendienteRegistrar = max(0, $diferencia - $yaRegistrado);
 
             return $this->res->ok('Resumen de período de prueba obtenido', [
@@ -8628,6 +9012,9 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
                 'fecha_fin_prueba'     => $fechaFinPrueba,
                 'dias_prueba'          => (int) $ucf['dias_presupuesto'],
                 'porcentaje'           => (int) $ucf['porcentaje_presupuesto'],
+                'en_prueba'            => $enPrueba,
+                'modo_acumulado'       => $modoAcumulado && $enPrueba,
+                'fecha_corte'          => ($modoAcumulado && $enPrueba) ? $hoy : null,
                 'presupuesto_asignado' => round($presupuestoAsignado, 2),
                 'consumo_real'         => round($consumoReal, 2),
                 'diferencia'           => round($diferencia, 2),
@@ -8830,41 +9217,1325 @@ WHERE l.estado COLLATE utf8mb4_general_ci IN ('aprobada', 'rechazada', 'devuelta
         }
     }
 
+    /**
+     * Lista candidatos del año en curso, filtrados por estado si se solicita.
+     * Excluye automáticamente los períodos descartados.
+     *
+     * GET: combustible/listarCandidatosRegistroExtraordinario
+     *      ?estado=pendiente|completado|en_prueba|todos   (default: todos)
+     *      &anio=2026                                      (default: año actual)
+     */
+    public function listarCandidatosRegistroExtraordinario()
+    {
+        try {
+            $estadoFiltro = $_GET['estado'] ?? 'todos'; // pendiente|completado|en_prueba|todos
+            $anio         = (int) ($_GET['anio'] ?? date('Y'));
+            $hoy          = date('Y-m-d');
+
+            // Pre-filtro SQL por año: inicio O fin del período caen en el año pedido.
+            // fecha_fin = fecha_ingreso + dias_presupuesto - 1 días.
+            $sql = "SELECT
+                    ucf.idUsuariosControlFechas,
+                    ucf.usuarioid,
+                    ucf.agenciaid,
+                    ucf.puestoid,
+                    ucf.fecha_ingreso,
+                    ucf.fecha_egreso,
+                    ucf.dias_presupuesto,
+                    ucf.porcentaje_presupuesto,
+                    dtp.nombres AS nombre_usuario,
+                    ag.nombre   AS agencia,
+                    pu.nombre   AS puesto,
+                    pg.monto_mensual,
+                    COALESCE(SUM(
+                        CASE WHEN re.activo = 1 AND re.estado != 'cancelado'
+                             THEN re.monto ELSE 0 END
+                    ), 0) AS ya_registrado,
+                    COUNT(CASE WHEN re.activo = 1 THEN 1 END) AS total_registros
+                FROM apoyo_combustibles.usuarioscontrolfechas ucf
+                INNER JOIN dbintranet.usuarios us
+                    ON ucf.usuarioid = us.idUsuarios
+                INNER JOIN dbintranet.datospersonales dtp
+                    ON us.idDatosPersonales = dtp.idDatosPersonales
+                INNER JOIN dbintranet.agencia ag
+                    ON ucf.agenciaid = ag.idAgencia
+                INNER JOIN dbintranet.puesto pu
+                    ON ucf.puestoid = pu.idPuesto
+                LEFT JOIN apoyo_combustibles.presupuestogeneral pg
+                    ON  pg.agenciaid = ucf.agenciaid
+                    AND pg.puestoid  = ucf.puestoid
+                    AND pg.anio      = ?
+                    AND pg.activo    = 1
+                LEFT JOIN apoyo_combustibles.registros_extraordinarios re
+                    ON re.ucfid = ucf.idUsuariosControlFechas
+                WHERE ucf.es_nuevo         = 1
+                  AND ucf.dias_presupuesto > 0
+                  AND ucf.activo           = 1
+                  -- Solo el año solicitado: inicio O fin dentro del año
+                  AND (
+                      YEAR(ucf.fecha_ingreso) = ?
+                      OR YEAR(DATE_ADD(ucf.fecha_ingreso,
+                              INTERVAL ucf.dias_presupuesto - 1 DAY)) = ?
+                  )
+                  -- Excluir descartados activos
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM apoyo_combustibles.periodos_descartados pd
+                      WHERE pd.ucfid  = ucf.idUsuariosControlFechas
+                        AND pd.activo = 1
+                  )
+                GROUP BY
+                    ucf.idUsuariosControlFechas, ucf.usuarioid, ucf.agenciaid,
+                    ucf.puestoid, ucf.fecha_ingreso, ucf.fecha_egreso,
+                    ucf.dias_presupuesto, ucf.porcentaje_presupuesto,
+                    dtp.nombres, ag.nombre, pu.nombre, pg.monto_mensual
+                ORDER BY ucf.fecha_ingreso DESC";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio, $anio, $anio]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $helper     = new PresupuestoRangoHelper($this->connect);
+            $candidatos = [];
+
+            foreach ($rows as $r) {
+                $montoMensual = (float) $r['monto_mensual'];
+                $porcentaje   = $r['porcentaje_presupuesto'] / 100;
+                $fechaIngreso = $r['fecha_ingreso'];
+
+                $fechaFinPrueba = (new \DateTime($fechaIngreso))
+                    ->modify("+{$r['dias_presupuesto']} days")
+                    ->modify('-1 day')
+                    ->format('Y-m-d');
+
+                $enPrueba = $hoy <= $fechaFinPrueba;
+
+                $presupuestoAsignado = $montoMensual > 0
+                    ? $helper->calcularRangoPrueba(
+                        $fechaIngreso, $fechaFinPrueba, $montoMensual, $porcentaje
+                    )
+                    : 0.0;
+
+                // Consumo real del período
+                $stmtC = $this->connect->prepare(
+                    "SELECT COALESCE(SUM(monto), 0)
+                 FROM apoyo_combustibles.liquidaciones
+                 WHERE usuarioid = ?
+                   AND estado NOT IN ('eliminada', 'rechazada')
+                   AND fecha_liquidacion BETWEEN ? AND ?"
+                );
+                $stmtC->execute([$r['usuarioid'], $fechaIngreso, $fechaFinPrueba . ' 23:59:59']);
+                $consumoReal = (float) $stmtC->fetchColumn();
+
+                $diferencia         = max(0, $presupuestoAsignado - $consumoReal);
+                $yaRegistrado       = (float) $r['ya_registrado'];
+                $pendienteRegistrar = max(0, $diferencia - $yaRegistrado);
+
+                if ($enPrueba) {
+                    $estado = 'en_prueba';
+                } elseif ($pendienteRegistrar > 0) {
+                    $estado = 'pendiente';
+                } else {
+                    $estado = 'completado';
+                }
+
+                // Aplicar filtro de estado (lazy por pestaña)
+                if ($estadoFiltro !== 'todos' && $estado !== $estadoFiltro) {
+                    continue;
+                }
+
+                $candidatos[] = [
+                    'idUsuariosControlFechas' => (int) $r['idUsuariosControlFechas'],
+                    'usuarioid'               => $r['usuarioid'],
+                    'nombre_usuario'          => $r['nombre_usuario'],
+                    'agencia'                 => $r['agencia'],
+                    'puesto'                  => $r['puesto'],
+                    'fecha_ingreso'           => $fechaIngreso,
+                    'fecha_fin_prueba'        => $fechaFinPrueba,
+                    'dias_presupuesto'        => (int) $r['dias_presupuesto'],
+                    'porcentaje'              => (int) $r['porcentaje_presupuesto'],
+                    'monto_mensual'           => round($montoMensual, 2),
+                    'presupuesto_asignado'    => round($presupuestoAsignado, 2),
+                    'consumo_real'            => round($consumoReal, 2),
+                    'diferencia'              => round($diferencia, 2),
+                    'ya_registrado'           => round($yaRegistrado, 2),
+                    'pendiente_registrar'     => round($pendienteRegistrar, 2),
+                    'total_registros'         => (int) $r['total_registros'],
+                    'requiere_complemento'    => $pendienteRegistrar > 0,
+                    'estado'                  => $estado,
+                ];
+            }
+
+            // Resumen: solo se calcula cuando se pide 'todos' (pestaña principal)
+            $resumen = null;
+            if ($estadoFiltro === 'todos') {
+                $resumen = [
+                    'en_prueba'  => count(array_filter($candidatos, fn($c) => $c['estado'] === 'en_prueba')),
+                    'pendiente'  => count(array_filter($candidatos, fn($c) => $c['estado'] === 'pendiente')),
+                    'completado' => count(array_filter($candidatos, fn($c) => $c['estado'] === 'completado')),
+                ];
+            }
+
+            return $this->res->ok('Candidatos obtenidos', [
+                'candidatos' => $candidatos,
+                'total'      => count($candidatos),
+                'resumen'    => $resumen,
+                'filtro'     => $estadoFiltro,
+                'anio'       => $anio,
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en listarCandidatosRegistroExtraordinario: " . $e->getMessage());
+            return $this->res->fail('Error al listar candidatos', $e);
+        }
+    }
+
+    /**
+     * Retorna los candidatos pendientes del año con número de cuenta,
+     * listo para generar el Excel de pago.
+     *
+     * GET: combustible/exportarCandidatosPago?anio=2026
+     */
+    public function exportarCandidatosPago()
+    {
+        try {
+            $anio = (int) ($_GET['anio'] ?? date('Y'));
+            $hoy  = date('Y-m-d');
+
+            $sql = "SELECT
+                    ucf.idUsuariosControlFechas,
+                    ucf.usuarioid,
+                    ucf.fecha_ingreso,
+                    ucf.dias_presupuesto,
+                    ucf.porcentaje_presupuesto,
+                    dtp.nombres AS nombre_usuario,
+                    dtp.dpi,
+                    ag.nombre   AS agencia,
+                    pu.nombre   AS puesto,
+                    pg.monto_mensual,
+                    cli.CodigoCliente,
+                    (
+                        SELECT cap.NumeroCuenta
+                        FROM asociado_t24.ccomndatoscaptaciones cap
+                        WHERE cap.Cliente  = cli.CodigoCliente
+                          AND cap.Producto = '114A.AHORRO.DISPONIBLE'
+                        ORDER BY cap.NumeroCuenta
+                        LIMIT 1
+                    ) AS numero_cuenta,
+                    COALESCE(SUM(
+                        CASE WHEN re.activo = 1 AND re.estado != 'cancelado'
+                             THEN re.monto ELSE 0 END
+                    ), 0) AS ya_registrado
+                FROM apoyo_combustibles.usuarioscontrolfechas ucf
+                INNER JOIN dbintranet.usuarios us
+                    ON ucf.usuarioid = us.idUsuarios
+                INNER JOIN dbintranet.datospersonales dtp
+                    ON us.idDatosPersonales = dtp.idDatosPersonales
+                INNER JOIN dbintranet.agencia ag ON ucf.agenciaid = ag.idAgencia
+                INNER JOIN dbintranet.puesto  pu ON ucf.puestoid  = pu.idPuesto
+                LEFT JOIN asociado_t24.comndatosclientes cli ON cli.Dpi = dtp.dpi
+                LEFT JOIN apoyo_combustibles.presupuestogeneral pg
+                    ON  pg.agenciaid = ucf.agenciaid
+                    AND pg.puestoid  = ucf.puestoid
+                    AND pg.anio      = ?
+                    AND pg.activo    = 1
+                LEFT JOIN apoyo_combustibles.registros_extraordinarios re
+                    ON re.ucfid = ucf.idUsuariosControlFechas
+                WHERE ucf.es_nuevo         = 1
+                  AND ucf.dias_presupuesto > 0
+                  AND ucf.activo           = 1
+                  AND (
+                      YEAR(ucf.fecha_ingreso) = ?
+                      OR YEAR(DATE_ADD(ucf.fecha_ingreso,
+                              INTERVAL ucf.dias_presupuesto - 1 DAY)) = ?
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM apoyo_combustibles.periodos_descartados pd
+                      WHERE pd.ucfid = ucf.idUsuariosControlFechas AND pd.activo = 1
+                  )
+                  -- Solo los que ya terminaron el período de prueba
+                  AND DATE_ADD(ucf.fecha_ingreso,
+                      INTERVAL ucf.dias_presupuesto - 1 DAY) < ?
+                GROUP BY
+                    ucf.idUsuariosControlFechas, ucf.usuarioid, ucf.fecha_ingreso,
+                    ucf.dias_presupuesto, ucf.porcentaje_presupuesto,
+                    dtp.nombres, dtp.dpi, ag.nombre, pu.nombre, pg.monto_mensual,
+                    cli.CodigoCliente
+                ORDER BY ag.nombre, dtp.nombres";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio, $anio, $anio, $hoy]);
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $helper  = new PresupuestoRangoHelper($this->connect);
+            $filas   = [];
+
+            foreach ($rows as $r) {
+                $montoMensual = (float) $r['monto_mensual'];
+                $porcentaje   = $r['porcentaje_presupuesto'] / 100;
+                $fechaIngreso = $r['fecha_ingreso'];
+                $fechaFin     = (new \DateTime($fechaIngreso))
+                    ->modify("+{$r['dias_presupuesto']} days")
+                    ->modify('-1 day')
+                    ->format('Y-m-d');
+
+                $presupuesto = $montoMensual > 0
+                    ? $helper->calcularRangoPrueba($fechaIngreso, $fechaFin, $montoMensual, $porcentaje)
+                    : 0.0;
+
+                // Consumo real
+                $stmtC = $this->connect->prepare(
+                    "SELECT COALESCE(SUM(monto), 0)
+                 FROM apoyo_combustibles.liquidaciones
+                 WHERE usuarioid = ?
+                   AND estado NOT IN ('eliminada', 'rechazada')
+                   AND fecha_liquidacion BETWEEN ? AND ?"
+                );
+                $stmtC->execute([$r['usuarioid'], $fechaIngreso, $fechaFin . ' 23:59:59']);
+                $consumo = (float) $stmtC->fetchColumn();
+
+                $diferencia  = max(0, $presupuesto - $consumo);
+                $yaRegistrado = (float) $r['ya_registrado'];
+                $pendiente   = max(0, $diferencia - $yaRegistrado);
+
+                if ($pendiente <= 0) continue; // Solo los que tienen algo pendiente
+
+                $filas[] = [
+                    'ucfid'                => (int) $r['idUsuariosControlFechas'],
+                    'usuarioid'            => $r['usuarioid'],
+                    'codigo_cliente'       => $r['CodigoCliente'],
+                    'nombre_usuario'       => $r['nombre_usuario'],
+                    'agencia'              => $r['agencia'],
+                    'puesto'               => $r['puesto'],
+                    'numero_cuenta'        => $r['numero_cuenta'] ?? '',
+                    'fecha_ingreso'        => $fechaIngreso,
+                    'fecha_fin_prueba'     => $fechaFin,
+                    'dias_presupuesto'     => (int) $r['dias_presupuesto'],
+                    'porcentaje'           => (int) $r['porcentaje_presupuesto'],
+                    'presupuesto_asignado' => round($presupuesto, 2),
+                    'consumo_real'         => round($consumo, 2),
+                    'ya_registrado'        => round($yaRegistrado, 2),
+                    'monto_a_pagar'        => round($pendiente, 2),
+                ];
+            }
+
+            return $this->res->ok('Datos de exportación obtenidos', [
+                'filas'       => $filas,
+                'total'       => count($filas),
+                'anio'        => $anio,
+                'generado_en' => date('Y-m-d H:i:s'),
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en exportarCandidatosPago: " . $e->getMessage());
+            return $this->res->fail('Error al generar exportación', $e);
+        }
+    }
+
+
+    /**
+     * Crea múltiples registros extraordinarios en una sola llamada.
+     * Usado después de aprobar el Excel de pagos.
+     *
+     * POST: combustible/crearRegistrosExtraordinariosMasivo
+     *
+     * @param object $datos {
+     *   registros: Array<{
+     *     usuarioid   : string,
+     *     ucfid       : int,
+     *     monto       : float,
+     *     descripcion : string,
+     *   }>
+     * }
+     */
+    public function crearRegistrosExtraordinariosMasivo($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->registros) || !is_array($datos->registros)) {
+                return $this->res->fail('Se requiere un array de registros');
+            }
+
+            $errores  = [];
+            $creados  = 0;
+            $omitidos = 0;
+
+            $this->connect->beginTransaction();
+
+            $sqlInsert = "INSERT INTO apoyo_combustibles.registros_extraordinarios
+                      (usuarioid, ucfid, monto, descripcion, tipo, estado, registrado_por)
+                      VALUES (?, ?, ?, ?, 'complemento_prueba', 'pendiente', ?)";
+
+            $stmtInsert = $this->connect->prepare($sqlInsert);
+
+            // Verificar UCF válido
+            $sqlVerUcf = "SELECT idUsuariosControlFechas, es_nuevo, dias_presupuesto
+                      FROM apoyo_combustibles.usuarioscontrolfechas
+                      WHERE idUsuariosControlFechas = ?
+                        AND usuarioid = ? AND activo = 1";
+            $stmtVerUcf = $this->connect->prepare($sqlVerUcf);
+
+            foreach ($datos->registros as $i => $reg) {
+                $reg = (object) $reg;
+                $fila = $i + 1;
+
+                if (empty($reg->usuarioid) || empty($reg->ucfid) || empty($reg->descripcion)
+                    || !isset($reg->monto) || (float) $reg->monto <= 0) {
+                    $errores[] = "Fila {$fila}: datos incompletos o monto inválido";
+                    $omitidos++;
+                    continue;
+                }
+
+                $stmtVerUcf->execute([(int) $reg->ucfid, $reg->usuarioid]);
+                $ucf = $stmtVerUcf->fetch(PDO::FETCH_ASSOC);
+
+                if (!$ucf || !$ucf['es_nuevo'] || (int) $ucf['dias_presupuesto'] <= 0) {
+                    $errores[] = "Fila {$fila}: UCF {$reg->ucfid} no válido para usuario {$reg->usuarioid}";
+                    $omitidos++;
+                    continue;
+                }
+
+                $stmtInsert->execute([
+                    $reg->usuarioid,
+                    (int) $reg->ucfid,
+                    round((float) $reg->monto, 2),
+                    strtoupper(trim($reg->descripcion)),
+                    $this->idUsuario,
+                ]);
+                $creados++;
+            }
+
+            $this->connect->commit();
+
+            return $this->res->ok("Carga masiva completada: {$creados} creados, {$omitidos} omitidos", [
+                'creados'  => $creados,
+                'omitidos' => $omitidos,
+                'errores'  => $errores,
+            ]);
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en crearRegistrosExtraordinariosMasivo: " . $e->getMessage());
+            return $this->res->fail('Error en carga masiva', $e);
+        }
+    }
+
+    /**
+     * Descarta un UCF de período de prueba: ya no aparece en la lista
+     * aunque tenga monto pendiente.
+     *
+     * POST: combustible/descartarPeriodoPrueba
+     *
+     * @param object $datos {
+     *   ucfid     : int,
+     *   usuarioid : string,
+     *   motivo    : string
+     * }
+     */
+    public function descartarPeriodoPrueba($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->ucfid))     return $this->res->fail('El UCF es requerido');
+            if (empty($datos->usuarioid)) return $this->res->fail('El usuario es requerido');
+            if (empty($datos->motivo))    return $this->res->fail('El motivo es requerido');
+
+            // Verificar que el UCF existe y es de prueba
+            $stmtV = $this->connect->prepare(
+                "SELECT idUsuariosControlFechas FROM apoyo_combustibles.usuarioscontrolfechas
+             WHERE idUsuariosControlFechas = ? AND usuarioid = ?
+               AND es_nuevo = 1 AND dias_presupuesto > 0 AND activo = 1"
+            );
+            $stmtV->execute([(int) $datos->ucfid, $datos->usuarioid]);
+            if (!$stmtV->fetch()) {
+                return $this->res->fail('El período UCF no existe o no es de prueba');
+            }
+
+            // Verificar que no esté ya descartado
+            $stmtD = $this->connect->prepare(
+                "SELECT idPeriodoDescartado FROM apoyo_combustibles.periodos_descartados
+             WHERE ucfid = ? AND activo = 1"
+            );
+            $stmtD->execute([(int) $datos->ucfid]);
+            if ($stmtD->fetch()) {
+                return $this->res->fail('Este período ya está descartado');
+            }
+
+            $this->connect->beginTransaction();
+            $stmt = $this->connect->prepare(
+                "INSERT INTO apoyo_combustibles.periodos_descartados
+             (ucfid, usuarioid, motivo, descartado_por)
+             VALUES (?, ?, ?, ?)"
+            );
+            $stmt->execute([
+                (int) $datos->ucfid,
+                $datos->usuarioid,
+                trim($datos->motivo),
+                $this->idUsuario,
+            ]);
+            $this->connect->commit();
+
+            return $this->res->ok('Período descartado correctamente');
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en descartarPeriodoPrueba: " . $e->getMessage());
+            return $this->res->fail('Error al descartar el período', $e);
+        }
+    }
+
+    /**
+     * Reactiva un UCF descartado para que vuelva a aparecer en la lista.
+     *
+     * POST: combustible/restaurarPeriodoDescartado
+     *
+     * @param object $datos { ucfid: int }
+     */
+    public function restaurarPeriodoDescartado($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+
+            if (empty($datos->ucfid)) return $this->res->fail('El UCF es requerido');
+
+            $this->connect->beginTransaction();
+            $stmt = $this->connect->prepare(
+                "UPDATE apoyo_combustibles.periodos_descartados
+             SET activo         = 0,
+                 restaurado_at  = NOW(),
+                 restaurado_por = ?
+             WHERE ucfid = ? AND activo = 1"
+            );
+            $stmt->execute([$this->idUsuario, (int) $datos->ucfid]);
+
+            if ($stmt->rowCount() === 0) {
+                $this->connect->rollBack();
+                return $this->res->fail('No se encontró un período descartado para ese UCF');
+            }
+
+            $this->connect->commit();
+            return $this->res->ok('Período restaurado correctamente');
+
+        } catch (Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en restaurarPeriodoDescartado: " . $e->getMessage());
+            return $this->res->fail('Error al restaurar el período', $e);
+        }
+    }
+
+// ----------------------------------------------------------------------------
+
+    /**
+     * Detalle completo de un período de prueba:
+     * resumen financiero + liquidaciones + registros extraordinarios.
+     *
+     * GET: combustible/obtenerDetallePeriodoPrueba?ucfid=XXX
+     */
+    public function obtenerDetallePeriodoPrueba()
+    {
+        try {
+            $ucfid = $_GET['ucfid'] ?? null;
+            if (empty($ucfid)) {
+                return $this->res->fail('El ID del período (ucfid) es requerido');
+            }
+
+            // Datos del UCF
+            $sql = "SELECT
+                        ucf.idUsuariosControlFechas,
+                        ucf.usuarioid,
+                        ucf.fecha_ingreso,
+                        ucf.fecha_egreso,
+                        ucf.dias_presupuesto,
+                        ucf.porcentaje_presupuesto,
+                        dtp.nombres AS nombre_usuario,
+                        ag.nombre   AS agencia,
+                        pu.nombre   AS puesto,
+                        pg.monto_mensual
+                    FROM apoyo_combustibles.usuarioscontrolfechas ucf
+                    INNER JOIN dbintranet.usuarios us
+                        ON ucf.usuarioid = us.idUsuarios
+                    INNER JOIN dbintranet.datospersonales dtp
+                        ON us.idDatosPersonales = dtp.idDatosPersonales
+                    INNER JOIN dbintranet.agencia ag
+                        ON ucf.agenciaid = ag.idAgencia
+                    INNER JOIN dbintranet.puesto pu
+                        ON ucf.puestoid = pu.idPuesto
+                    LEFT JOIN apoyo_combustibles.presupuestogeneral pg
+                        ON  pg.agenciaid = ucf.agenciaid
+                        AND pg.puestoid  = ucf.puestoid
+                        AND pg.anio      = YEAR(ucf.fecha_ingreso)
+                        AND pg.activo    = 1
+                    WHERE ucf.idUsuariosControlFechas = ?
+                      AND ucf.activo = 1";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([(int) $ucfid]);
+            $ucf = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$ucf) {
+                return $this->res->fail('El período UCF no existe');
+            }
+
+            $fechaIngreso   = $ucf['fecha_ingreso'];
+            $fechaFinPrueba = (new \DateTime($fechaIngreso))
+                ->modify("+{$ucf['dias_presupuesto']} days")
+                ->modify('-1 day')
+                ->format('Y-m-d');
+
+            $montoMensual        = (float) $ucf['monto_mensual'];
+            $porcentaje          = $ucf['porcentaje_presupuesto'] / 100;
+            $helper = new PresupuestoRangoHelper($this->connect);
+            $presupuestoAsignado = $montoMensual > 0
+                ? $helper->calcularRangoPrueba(
+                    $fechaIngreso, $fechaFinPrueba, $montoMensual, $porcentaje
+                )
+                : 0.0;
+
+            // Liquidaciones del período
+            $sqlLiq = "SELECT
+                        l.idLiquidaciones,
+                        l.numero_factura,
+                        l.monto,
+                        l.fecha_liquidacion,
+                        l.estado,
+                        l.descripcion,
+                        ta.nombre AS tipo_apoyo
+                    FROM apoyo_combustibles.liquidaciones l
+                    LEFT JOIN apoyo_combustibles.tiposapoyo ta
+                        ON l.tipoapoyoid = ta.idTiposApoyo
+                    WHERE l.usuarioid = ?
+                      AND l.estado NOT IN ('eliminada', 'rechazada')
+                      AND l.fecha_liquidacion BETWEEN ? AND ?
+                    ORDER BY l.fecha_liquidacion ASC";
+
+            $stmtL = $this->connect->prepare($sqlLiq);
+            $stmtL->execute([$ucf['usuarioid'], $fechaIngreso, $fechaFinPrueba . ' 23:59:59']);
+            $liquidaciones = $stmtL->fetchAll(PDO::FETCH_ASSOC);
+            $consumoReal   = (float) array_sum(array_column($liquidaciones, 'monto'));
+
+            // Registros extraordinarios del UCF
+            $sqlRe = "SELECT
+                        re.idRegistroExtraordinario,
+                        re.monto,
+                        re.descripcion,
+                        re.tipo,
+                        re.estado,
+                        re.created_at,
+                        dtp.nombres AS registrado_por
+                    FROM apoyo_combustibles.registros_extraordinarios re
+                    LEFT JOIN dbintranet.usuarios us_r
+                        ON re.registrado_por = us_r.idUsuarios
+                    LEFT JOIN dbintranet.datospersonales dtp
+                        ON us_r.idDatosPersonales = dtp.idDatosPersonales
+                    WHERE re.ucfid  = ?
+                      AND re.activo = 1
+                    ORDER BY re.created_at DESC";
+
+            $stmtR = $this->connect->prepare($sqlRe);
+            $stmtR->execute([(int) $ucfid]);
+            $registrosExtraordinarios = $stmtR->fetchAll(PDO::FETCH_ASSOC);
+
+            $yaRegistrado = 0.0;
+            foreach ($registrosExtraordinarios as $re) {
+                if ($re['estado'] !== 'cancelado') {
+                    $yaRegistrado += (float) $re['monto'];
+                }
+            }
+
+            $diferencia         = max(0, $presupuestoAsignado - $consumoReal);
+            $pendienteRegistrar = max(0, $diferencia - $yaRegistrado);
+            $hoy                = date('Y-m-d');
+
+            return $this->res->ok('Detalle obtenido', [
+                'ucf' => [
+                    'idUsuariosControlFechas' => (int) $ucf['idUsuariosControlFechas'],
+                    'usuarioid'               => $ucf['usuarioid'],
+                    'nombre_usuario'          => $ucf['nombre_usuario'],
+                    'agencia'                 => $ucf['agencia'],
+                    'puesto'                  => $ucf['puesto'],
+                    'fecha_ingreso'           => $fechaIngreso,
+                    'fecha_fin_prueba'        => $fechaFinPrueba,
+                    'dias_presupuesto'        => (int) $ucf['dias_presupuesto'],
+                    'porcentaje'              => (int) $ucf['porcentaje_presupuesto'],
+                    'estado'                  => $hoy <= $fechaFinPrueba ? 'en_prueba'
+                        : ($pendienteRegistrar > 0 ? 'pendiente' : 'completado'),
+                ],
+                'resumen' => [
+                    'presupuesto_asignado' => round($presupuestoAsignado, 2),
+                    'consumo_real'         => round($consumoReal, 2),
+                    'diferencia'           => round($diferencia, 2),
+                    'ya_registrado'        => round($yaRegistrado, 2),
+                    'pendiente_registrar'  => round($pendienteRegistrar, 2),
+                    'requiere_complemento' => $pendienteRegistrar > 0,
+                ],
+                'liquidaciones'             => $liquidaciones,
+                'registros_extraordinarios' => $registrosExtraordinarios,
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en obtenerDetallePeriodoPrueba: " . $e->getMessage());
+            return $this->res->fail('Error al obtener el detalle', $e);
+        }
+    }
+
+    /**
+     * Lista los períodos de prueba descartados del año en curso.
+     *
+     * GET: combustible/listarPeriodosDescartados
+     */
+    public function listarPeriodosDescartados()
+    {
+        try {
+            $anio = (int) date('Y');
+
+            $sql = "SELECT
+                    pd.idPeriodoDescartado,
+                    pd.ucfid,
+                    pd.usuarioid,
+                    pd.motivo,
+                    pd.created_at AS descartado_en,
+                    dtp.nombres   AS nombre_usuario,
+                    ag.nombre     AS agencia,
+                    pu.nombre     AS puesto,
+                    ucf.fecha_ingreso,
+                    ucf.dias_presupuesto,
+                    ucf.porcentaje_presupuesto,
+                    dtp_reg.nombres AS descartado_por
+                FROM apoyo_combustibles.periodos_descartados pd
+                INNER JOIN apoyo_combustibles.usuarioscontrolfechas ucf
+                    ON pd.ucfid = ucf.idUsuariosControlFechas
+                INNER JOIN dbintranet.usuarios us
+                    ON pd.usuarioid = us.idUsuarios
+                INNER JOIN dbintranet.datospersonales dtp
+                    ON us.idDatosPersonales = dtp.idDatosPersonales
+                INNER JOIN dbintranet.agencia ag
+                    ON ucf.agenciaid = ag.idAgencia
+                INNER JOIN dbintranet.puesto pu
+                    ON ucf.puestoid = pu.idPuesto
+                LEFT JOIN dbintranet.usuarios us_reg
+                    ON pd.descartado_por = us_reg.idUsuarios
+                LEFT JOIN dbintranet.datospersonales dtp_reg
+                    ON us_reg.idDatosPersonales = dtp_reg.idDatosPersonales
+                WHERE pd.activo = 1
+                  AND (
+                      YEAR(ucf.fecha_ingreso) = ?
+                      OR YEAR(DATE_ADD(ucf.fecha_ingreso,
+                              INTERVAL ucf.dias_presupuesto - 1 DAY)) = ?
+                  )
+                ORDER BY pd.created_at DESC";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio, $anio]);
+            $registros = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return $this->res->ok('Períodos descartados obtenidos', [
+                'registros' => $registros,
+                'total'     => count($registros),
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en listarPeriodosDescartados: " . $e->getMessage());
+            return $this->res->fail('Error al listar períodos descartados', $e);
+        }
+    }
+
 // ============================================================================
-// HELPER PRIVADO — presupuesto de prueba por rango mensual variable
+// ENDPOINTS — FLUJO DE APROBACIÓN DE SOLICITUD A GERENCIA
+// ============================================================================
+// Agregar al controller existente junto a listarEnvioPagoLiquidaciones.
+// Todos usan $this->_inicializarHelperEnvioPago() del mismo controller.
 // ============================================================================
 
     /**
-     * Calcula el presupuesto del período de prueba usando tarifa diaria
-     * variable (monto_mensual / días_del_mes) igual que el resto del sistema.
+     * Devuelve la solicitud de aprobación más reciente con su estado completo.
+     * Usado para que el banner del frontend sepa qué mostrar.
+     *
+     * GET: combustible/obtenerEstadoSolicitud
      */
-    private function _calcularPresupuestoPruebaRangoMensual(
-        string $fechaInicio,
-        string $fechaFin,
-        float  $montoMensual,
-        float  $porcentaje
-    ): float {
-        if ($montoMensual <= 0 || $porcentaje <= 0) return 0.0;
+    public function obtenerEstadoSolicitud()
+    {
+        try {
+            $this->_inicializarHelperEnvioPago();
+            $solicitud = $this->envioPagoHelper->obtenerSolicitudActiva();
 
-        $inicio = new \DateTime($fechaInicio);
-        $fin    = new \DateTime($fechaFin);
-        $total  = 0.0;
-        $cursor = new \DateTime($inicio->format('Y-m-01'));
+            // Contar sin vincular independientemente de si hay solicitud activa
+            $sqlSinVincular = "SELECT COUNT(*), COALESCE(SUM(monto), 0)
+                           FROM apoyo_combustibles.liquidaciones
+                           WHERE estado = 'aprobada'
+                             AND comprobantecontableid IS NULL
+                             AND aprobaciongerenciaid IS NULL";
+            $stmt = $this->connect->prepare($sqlSinVincular);
+            $stmt->execute();
+            [$sinVincular, $montoSinVincular] = $stmt->fetch(\PDO::FETCH_NUM);
 
-        while ($cursor <= $fin) {
-            $diasDelMes   = (int) $cursor->format('t');
-            $tarifaDiaria = ($montoMensual / $diasDelMes) * $porcentaje;
+            return $this->res->ok('Estado de solicitud obtenido', [
+                'solicitud'              => $solicitud,
+                'tiene_activa'           => $solicitud !== null,
+                'liquidaciones_sin_vincular' => (int) $sinVincular,
+                'monto_sin_vincular'     => (float) $montoSinVincular,
+            ]);
 
-            $iniEf = $cursor < $inicio ? clone $inicio : clone $cursor;
-            $finMes = new \DateTime($cursor->format('Y-m-') . str_pad($diasDelMes, 2, '0', STR_PAD_LEFT));
-            $finEf  = $finMes < $fin ? clone $finMes : clone $fin;
-
-            $dias = (int) $iniEf->diff($finEf)->days + 1;
-            if ($dias > 0) $total += $tarifaDiaria * $dias;
-
-            $cursor->modify('+1 month');
+        } catch (\Exception $e) {
+            error_log("Error en obtenerEstadoSolicitud: " . $e->getMessage());
+            return $this->res->fail('Error al obtener estado de solicitud', $e);
         }
+    }
 
-        return $total;
+// ─────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Crea una nueva solicitud de aprobación y vincula todas las liquidaciones
+     * aprobadas sin comprobante.
+     *
+     * POST: combustible/enviarSolicitudAprobacion
+     *
+     * @param object $datos {
+     *   descripcion?  : string   — descripción del período/cierre
+     *   observaciones?: string
+     * }
+     *
+     * Permisos: solo contabilidad
+     */
+    public function enviarSolicitudAprobacion($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+            $this->_inicializarHelperEnvioPago();
+
+            $this->connect->beginTransaction();
+
+            $resultado = $this->envioPagoHelper->enviarSolicitud(
+                $this->idUsuario,
+                $datos->descripcion  ?? null,
+                $datos->observaciones ?? null
+            );
+
+            $this->connect->commit();
+
+            return $this->res->ok('Solicitud enviada a gerencia correctamente', $resultado);
+
+        } catch (\RuntimeException $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            return $this->res->fail($e->getMessage());
+
+        } catch (\Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en enviarSolicitudAprobacion: " . $e->getMessage());
+            return $this->res->fail('Error al enviar solicitud', $e);
+        }
+    }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Aprueba o rechaza una solicitud de gerencia.
+     *
+     * POST: combustible/resolverSolicitud
+     *
+     * @param object $datos {
+     *   aprobacion_id : int      — idAprobacionesGerencia (requerido)
+     *   accion        : string   — 'aprobar' | 'rechazar'  (requerido)
+     *   motivo_rechazo: string   — requerido si accion = 'rechazar'
+     *   observaciones?: string
+     * }
+     *
+     * Permisos: solo gerencia
+     */
+    public function resolverSolicitud($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+            $this->_inicializarHelperEnvioPago();
+
+            if (empty($datos->aprobacion_id) || !is_numeric($datos->aprobacion_id)) {
+                return $this->res->fail('El ID de aprobación es requerido');
+            }
+
+            if (empty($datos->accion)) {
+                return $this->res->fail('La acción es requerida (aprobar o rechazar)');
+            }
+
+            $this->connect->beginTransaction();
+
+            $resultado = $this->envioPagoHelper->resolverSolicitud(
+                (int) $datos->aprobacion_id,
+                $datos->accion,
+                $this->idUsuario,
+                $datos->motivo_rechazo ?? null,
+                $datos->observaciones  ?? null
+            );
+
+            $this->connect->commit();
+
+            $mensaje = $datos->accion === 'aprobar'
+                ? 'Solicitud aprobada correctamente'
+                : 'Solicitud rechazada';
+
+            return $this->res->ok($mensaje, $resultado);
+
+        } catch (\InvalidArgumentException $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            return $this->res->fail($e->getMessage());
+
+        } catch (\RuntimeException $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            return $this->res->fail($e->getMessage());
+
+        } catch (\Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en resolverSolicitud: " . $e->getMessage());
+            return $this->res->fail('Error al procesar la solicitud', $e);
+        }
+    }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Reenvía una solicitud rechazada actualizando las liquidaciones vinculadas.
+     * Re-captura liquidaciones nuevas o modificadas desde el rechazo.
+     *
+     * POST: combustible/reenviarSolicitud
+     *
+     * @param object $datos {
+     *   aprobacion_id : int      — idAprobacionesGerencia (requerido)
+     *   observaciones?: string
+     * }
+     *
+     * Permisos: solo contabilidad
+     */
+    public function reenviarSolicitud($datos)
+    {
+        try {
+            $datos = $this->limpiarDatos($datos);
+            $this->_inicializarHelperEnvioPago();
+
+            if (empty($datos->aprobacion_id) || !is_numeric($datos->aprobacion_id)) {
+                return $this->res->fail('El ID de aprobación es requerido');
+            }
+
+            $this->connect->beginTransaction();
+
+            $resultado = $this->envioPagoHelper->reenviarSolicitud(
+                (int) $datos->aprobacion_id,
+                $this->idUsuario,
+                $datos->observaciones ?? null
+            );
+
+            $this->connect->commit();
+
+            return $this->res->ok(
+                'Solicitud reenviada a gerencia correctamente',
+                $resultado
+            );
+
+        } catch (\RuntimeException $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            return $this->res->fail($e->getMessage());
+
+        } catch (\Exception $e) {
+            if ($this->connect->inTransaction()) $this->connect->rollBack();
+            error_log("Error en reenviarSolicitud: " . $e->getMessage());
+            return $this->res->fail('Error al reenviar solicitud', $e);
+        }
+    }
+
+
+    // ============================================================================
+// ENDPOINTS PHP — REPORTERÍA: COMPROBANTES Y APROBACIONES
+// Pegar dentro de CombustibleApiController (o el helper correspondiente)
+// ============================================================================
+
+
+// ── REPORTE COMPROBANTES ──────────────────────────────────────────────────────
+
+    /**
+     * Lista todos los comprobantes contables del año, con totales agrupados.
+     *
+     * GET: combustible/listarReporteComprobantes?anio=YYYY
+     */
+    public function listarReporteComprobantes()
+    {
+        try {
+            $anio = isset($_GET['anio']) ? (int) $_GET['anio'] : (int) date('Y');
+
+            // Comprobantes del año con totales agrupados
+            $sql = "SELECT
+                cc.idComprobantesContables,
+                cc.numero_comprobante,
+                cc.tipo,
+                cc.fecha_comprobante,
+                cc.mes_anio_comprobante,
+                DATE_FORMAT(cc.mes_anio_comprobante, '%M %Y') AS mes_label,
+                cc.monto_total,
+                cc.observaciones,
+                cc.created_at,
+                -- Nombre del registrador
+                COALESCE(dp.nombres, cc.registrado_por) AS registrado_por,
+                -- Conteos de liquidaciones y colaboradores distintos
+                COUNT(l.idLiquidaciones)          AS cantidad_liquidaciones,
+                COUNT(DISTINCT l.usuarioid)       AS cantidad_usuarios
+            FROM apoyo_combustibles.comprobantescontables cc
+            LEFT JOIN apoyo_combustibles.liquidaciones l
+                ON l.comprobantecontableid = cc.idComprobantesContables
+            LEFT JOIN dbintranet.usuarios u
+                ON u.idUsuarios = cc.registrado_por
+            LEFT JOIN dbintranet.datospersonales dp
+                ON dp.idDatosPersonales = u.idDatosPersonales
+            WHERE YEAR(cc.fecha_comprobante) = ?
+              AND cc.tipo = 'liquidacion'
+            GROUP BY cc.idComprobantesContables
+            ORDER BY cc.fecha_comprobante DESC";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio]);
+            $comprobantes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Monto total del año
+            $montoAnio = array_sum(array_column($comprobantes, 'monto_total'));
+
+            // Años disponibles
+            $sqlAnios = "SELECT DISTINCT YEAR(fecha_comprobante) AS anio
+                         FROM apoyo_combustibles.comprobantescontables
+                         WHERE tipo = 'liquidacion'
+                         ORDER BY anio DESC";
+            $stmtA = $this->connect->prepare($sqlAnios);
+            $stmtA->execute();
+            $aniosDisp = $stmtA->fetchAll(PDO::FETCH_COLUMN);
+
+            // Asegurar que el año actual aparezca aunque no tenga registros
+            if (!in_array((int) date('Y'), $aniosDisp)) {
+                array_unshift($aniosDisp, (int) date('Y'));
+            }
+
+            return $this->res->ok('Comprobantes obtenidos correctamente', [
+                'anio'              => $anio,
+                'comprobantes'      => $comprobantes,
+                'total'             => count($comprobantes),
+                'monto_total_anio'  => round((float) $montoAnio, 2),
+                'anios_disponibles' => array_map('intval', $aniosDisp),
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en listarReporteComprobantes: " . $e->getMessage());
+            return $this->res->fail('Error al obtener comprobantes', $e);
+        }
+    }
+
+
+    /**
+     * Detalle completo de un comprobante: sus liquidaciones con todos los datos.
+     *
+     * GET: combustible/obtenerDetalleComprobante?id={idComprobantesContables}
+     */
+    public function obtenerDetalleComprobante()
+    {
+        try {
+            $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
+
+            if ($id <= 0) {
+                return $this->res->fail('El ID del comprobante es requerido');
+            }
+
+            // Cabecera del comprobante
+            $sqlCabecera = "SELECT
+                cc.idComprobantesContables,
+                cc.numero_comprobante,
+                cc.tipo,
+                cc.fecha_comprobante,
+                cc.mes_anio_comprobante,
+                DATE_FORMAT(cc.mes_anio_comprobante, '%M %Y') AS mes_label,
+                cc.monto_total,
+                cc.observaciones,
+                cc.created_at,
+                COALESCE(dp.nombres, cc.registrado_por) AS registrado_por
+            FROM apoyo_combustibles.comprobantescontables cc
+            LEFT JOIN dbintranet.usuarios u
+                ON u.idUsuarios = cc.registrado_por
+            LEFT JOIN dbintranet.datospersonales dp
+                ON dp.idDatosPersonales = u.idDatosPersonales
+            WHERE cc.idComprobantesContables = ?";
+
+            $stmt = $this->connect->prepare($sqlCabecera);
+            $stmt->execute([$id]);
+            $cabecera = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$cabecera) {
+                return $this->res->fail('Comprobante no encontrado');
+            }
+
+            // Liquidaciones del comprobante
+            $sqlLiq = "SELECT
+                l.idLiquidaciones,
+                l.numero_factura,
+                l.monto,
+                l.monto_factura,
+                l.descripcion,
+                l.detalle,
+                l.fecha_liquidacion,
+                l.estado,
+                ta.nombre  AS tipo_apoyo,
+                v.marca    AS vehiculo,
+                v.placa,
+                -- Datos del colaborador
+                cli.CodigoCliente,
+                dtp.nombres  AS NombreUsuario,
+                ag.nombre    AS Agencia,
+                pu.nombre    AS Puesto,
+                (
+                    SELECT cap2.NumeroCuenta
+                    FROM asociado_t24.ccomndatoscaptaciones cap2
+                    WHERE cap2.Cliente = cli.CodigoCliente
+                      AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
+                    ORDER BY cap2.NumeroCuenta
+                    LIMIT 1
+                ) AS PrimeraCuenta
+            FROM apoyo_combustibles.liquidaciones l
+            LEFT JOIN apoyo_combustibles.tiposapoyo ta  ON ta.idTiposApoyo = l.tipoapoyoid
+            LEFT JOIN apoyo_combustibles.vehiculos   v  ON v.idVehiculos   = l.vehiculoid
+            LEFT JOIN dbintranet.usuarios            us ON us.idUsuarios   = l.usuarioid
+            LEFT JOIN dbintranet.datospersonales    dtp ON dtp.idDatosPersonales = us.idDatosPersonales
+            LEFT JOIN asociado_t24.comndatosclientes cli ON cli.Dpi = dtp.dpi
+            INNER JOIN dbintranet.agencia            ag  ON ag.idAgencia = us.idAgencia
+            INNER JOIN dbintranet.puesto             pu  ON pu.idPuesto  = us.idPuesto
+            WHERE l.comprobantecontableid = ?
+            ORDER BY ag.nombre, dtp.nombres, l.fecha_liquidacion";
+
+            $stmt = $this->connect->prepare($sqlLiq);
+            $stmt->execute([$id]);
+            $liquidaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return $this->res->ok('Detalle obtenido correctamente', array_merge($cabecera, [
+                'cantidad_liquidaciones' => count($liquidaciones),
+                'cantidad_usuarios'      => count(array_unique(array_column($liquidaciones, 'CodigoCliente'))),
+                'liquidaciones'          => $liquidaciones,
+            ]));
+
+        } catch (Exception $e) {
+            error_log("Error en obtenerDetalleComprobante: " . $e->getMessage());
+            return $this->res->fail('Error al obtener detalle del comprobante', $e);
+        }
+    }
+
+
+// ── REPORTE APROBACIONES ──────────────────────────────────────────────────────
+
+    /**
+     * Lista todas las solicitudes de aprobación del año.
+     *
+     * GET: combustible/listarReporteAprobaciones?anio=YYYY
+     */
+    public function listarReporteAprobaciones()
+    {
+        try {
+            $anio = isset($_GET['anio']) ? (int) $_GET['anio'] : (int) date('Y');
+
+            $sql = "SELECT
+                ag.idAprobacionesGerencia,
+                ag.descripcion,
+                ag.observaciones,
+                ag.motivo_rechazo,
+                ag.created_at,
+                ag.updated_at,
+                ea.codigo AS estado_codigo,
+                ea.nombre AS estado_nombre,
+                -- Solicitante
+                COALESCE(dp_env.nombres, ag.enviado_por) AS enviado_por,
+                ag.fecha_envio,
+                -- Revisor
+                COALESCE(dp_rev.nombres, ag.revisado_por) AS revisado_por,
+                ag.fecha_revision,
+                -- Conteos
+                COUNT(l.idLiquidaciones)         AS total_liquidaciones,
+                COALESCE(SUM(l.monto), 0)        AS monto_total
+            FROM apoyo_combustibles.aprobacionesgerencia ag
+            INNER JOIN apoyo_combustibles.estadosaprobacion ea
+                ON ea.idEstadosAprobacion = ag.estadoaprobacionid
+            -- Solicitante
+            LEFT JOIN dbintranet.usuarios u_env
+                ON u_env.idUsuarios = ag.enviado_por
+            LEFT JOIN dbintranet.datospersonales dp_env
+                ON dp_env.idDatosPersonales = u_env.idDatosPersonales
+            -- Revisor
+            LEFT JOIN dbintranet.usuarios u_rev
+                ON u_rev.idUsuarios = ag.revisado_por
+            LEFT JOIN dbintranet.datospersonales dp_rev
+                ON dp_rev.idDatosPersonales = u_rev.idDatosPersonales
+            -- Liquidaciones vinculadas
+            LEFT JOIN apoyo_combustibles.liquidaciones l
+                ON l.aprobaciongerenciaid = ag.idAprobacionesGerencia
+            WHERE YEAR(ag.created_at) = ?
+            GROUP BY ag.idAprobacionesGerencia, ea.idEstadosAprobacion,
+                     dp_env.idDatosPersonales, dp_rev.idDatosPersonales
+            ORDER BY ag.idAprobacionesGerencia DESC";
+
+            $stmt = $this->connect->prepare($sql);
+            $stmt->execute([$anio]);
+            $aprobaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Años disponibles
+            $sqlAnios = "SELECT DISTINCT YEAR(created_at) AS anio
+                         FROM apoyo_combustibles.aprobacionesgerencia
+                         ORDER BY anio DESC";
+            $stmtA = $this->connect->prepare($sqlAnios);
+            $stmtA->execute();
+            $aniosDisp = $stmtA->fetchAll(PDO::FETCH_COLUMN);
+
+            if (!in_array((int) date('Y'), $aniosDisp)) {
+                array_unshift($aniosDisp, (int) date('Y'));
+            }
+
+            return $this->res->ok('Aprobaciones obtenidas correctamente', [
+                'anio'              => $anio,
+                'aprobaciones'      => $aprobaciones,
+                'total'             => count($aprobaciones),
+                'anios_disponibles' => array_map('intval', $aniosDisp),
+            ]);
+
+        } catch (Exception $e) {
+            error_log("Error en listarReporteAprobaciones: " . $e->getMessage());
+            return $this->res->fail('Error al obtener aprobaciones', $e);
+        }
+    }
+
+
+    /**
+     * Detalle completo de una solicitud: liquidaciones y log de cambios.
+     *
+     * GET: combustible/obtenerDetalleAprobacion?id={idAprobacionesGerencia}
+     */
+    public function obtenerDetalleAprobacion()
+    {
+        try {
+            $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
+
+            if ($id <= 0) {
+                return $this->res->fail('El ID de aprobación es requerido');
+            }
+
+            // Cabecera de la solicitud
+            $sqlCabecera = "SELECT
+                ag.idAprobacionesGerencia,
+                ag.descripcion,
+                ag.observaciones,
+                ag.motivo_rechazo,
+                ag.created_at,
+                ag.updated_at,
+                ea.codigo AS estado_codigo,
+                ea.nombre AS estado_nombre,
+                COALESCE(dp_env.nombres, ag.enviado_por)  AS enviado_por,
+                ag.fecha_envio,
+                COALESCE(dp_rev.nombres, ag.revisado_por) AS revisado_por,
+                ag.fecha_revision
+            FROM apoyo_combustibles.aprobacionesgerencia ag
+            INNER JOIN apoyo_combustibles.estadosaprobacion ea
+                ON ea.idEstadosAprobacion = ag.estadoaprobacionid
+            LEFT JOIN dbintranet.usuarios u_env
+                ON u_env.idUsuarios = ag.enviado_por
+            LEFT JOIN dbintranet.datospersonales dp_env
+                ON dp_env.idDatosPersonales = u_env.idDatosPersonales
+            LEFT JOIN dbintranet.usuarios u_rev
+                ON u_rev.idUsuarios = ag.revisado_por
+            LEFT JOIN dbintranet.datospersonales dp_rev
+                ON dp_rev.idDatosPersonales = u_rev.idDatosPersonales
+            WHERE ag.idAprobacionesGerencia = ?";
+
+            $stmt = $this->connect->prepare($sqlCabecera);
+            $stmt->execute([$id]);
+            $cabecera = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$cabecera) {
+                return $this->res->fail('Solicitud de aprobación no encontrada');
+            }
+
+            // Liquidaciones vinculadas
+            $sqlLiq = "SELECT
+                l.idLiquidaciones,
+                l.numero_factura,
+                l.monto,
+                l.monto_factura,
+                l.descripcion,
+                l.detalle,
+                l.fecha_liquidacion,
+                l.estado,
+                l.comprobantecontableid,
+                ta.nombre   AS tipo_apoyo,
+                v.marca     AS vehiculo,
+                v.placa,
+                -- Comprobante asignado (si existe)
+                cc.numero_comprobante,
+                DATE_FORMAT(cc.mes_anio_comprobante, '%M %Y') AS mes_comprobante,
+                -- Datos del colaborador
+                cli.CodigoCliente,
+                dtp.nombres  AS NombreUsuario,
+                ag_usr.nombre AS Agencia,
+                pu.nombre     AS Puesto,
+                (
+                    SELECT cap2.NumeroCuenta
+                    FROM asociado_t24.ccomndatoscaptaciones cap2
+                    WHERE cap2.Cliente = cli.CodigoCliente
+                      AND cap2.Producto = '114A.AHORRO.DISPONIBLE'
+                    ORDER BY cap2.NumeroCuenta
+                    LIMIT 1
+                ) AS PrimeraCuenta
+            FROM apoyo_combustibles.liquidaciones l
+            LEFT JOIN apoyo_combustibles.tiposapoyo ta   ON ta.idTiposApoyo  = l.tipoapoyoid
+            LEFT JOIN apoyo_combustibles.vehiculos   v   ON v.idVehiculos    = l.vehiculoid
+            LEFT JOIN apoyo_combustibles.comprobantescontables cc
+                ON cc.idComprobantesContables = l.comprobantecontableid
+            LEFT JOIN dbintranet.usuarios            us  ON us.idUsuarios    = l.usuarioid
+            LEFT JOIN dbintranet.datospersonales    dtp  ON dtp.idDatosPersonales = us.idDatosPersonales
+            LEFT JOIN asociado_t24.comndatosclientes cli ON cli.Dpi = dtp.dpi
+            INNER JOIN dbintranet.agencia         ag_usr ON ag_usr.idAgencia = us.idAgencia
+            INNER JOIN dbintranet.puesto             pu  ON pu.idPuesto      = us.idPuesto
+            WHERE l.aprobaciongerenciaid = ?
+            ORDER BY ag_usr.nombre, dtp.nombres, l.fecha_liquidacion";
+
+            $stmt = $this->connect->prepare($sqlLiq);
+            $stmt->execute([$id]);
+            $liquidaciones = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            // Log de cambios de estado
+            $sqlLog = "SELECT
+                agl.idAprobacionesGerenciaLog,
+                agl.created_at,
+                agl.motivo_rechazo,
+                agl.observaciones,
+                COALESCE(dp.nombres, agl.usuarioid) AS usuario,
+                ea_ant.codigo AS estado_anterior_codigo,
+                ea_ant.nombre AS estado_anterior_nombre,
+                ea_nvo.codigo AS estado_nuevo_codigo,
+                ea_nvo.nombre AS estado_nuevo_nombre
+            FROM apoyo_combustibles.aprobacionesgerencialog agl
+            LEFT JOIN dbintranet.usuarios u
+                ON u.idUsuarios = agl.usuarioid
+            LEFT JOIN dbintranet.datospersonales dp
+                ON dp.idDatosPersonales = u.idDatosPersonales
+            LEFT JOIN apoyo_combustibles.estadosaprobacion ea_ant
+                ON ea_ant.idEstadosAprobacion = agl.estadoaprobacion_anterior
+            INNER JOIN apoyo_combustibles.estadosaprobacion ea_nvo
+                ON ea_nvo.idEstadosAprobacion = agl.estadoaprobacion_nuevo
+            WHERE agl.aprobaciongerenciaid = ?
+            ORDER BY agl.idAprobacionesGerenciaLog ASC";
+
+            $stmtLog = $this->connect->prepare($sqlLog);
+            $stmtLog->execute([$id]);
+            $log = $stmtLog->fetchAll(PDO::FETCH_ASSOC);
+
+            $montoTotal = array_sum(array_column($liquidaciones, 'monto'));
+
+            return $this->res->ok('Detalle obtenido correctamente', array_merge($cabecera, [
+                'monto_total'            => round((float) $montoTotal, 2),
+                'cantidad_liquidaciones' => count($liquidaciones),
+                'cantidad_usuarios'      => count(array_unique(array_column($liquidaciones, 'CodigoCliente'))),
+                'liquidaciones'          => $liquidaciones,
+                'log'                    => $log,
+            ]));
+
+        } catch (Exception $e) {
+            error_log("Error en obtenerDetalleAprobacion: " . $e->getMessage());
+            return $this->res->fail('Error al obtener detalle de la aprobación', $e);
+        }
     }
 }

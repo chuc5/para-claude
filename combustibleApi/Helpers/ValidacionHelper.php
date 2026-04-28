@@ -41,7 +41,7 @@ class ValidacionHelper
      */
     public function __construct(
         PDO $connect,
-        $idUsuario,
+            $idUsuario,
         ConsumoHelper $consumoHelper,
         PresupuestoAnualHelper $presupuestoAnualHelper,
         PresupuestoMensualHelper $presupuestoMensualHelper
@@ -69,7 +69,7 @@ class ValidacionHelper
     {
         try {
             $anio = date('Y');
-            $presupuesto = $this->presupuestoAnualHelper->obtener($anio);
+            $presupuesto = $this->presupuestoAnualHelper->obtener($anio, true);
 
             if (!$presupuesto) {
                 return [
@@ -78,24 +78,27 @@ class ValidacionHelper
                 ];
             }
 
-            // Validar anual
-            $consumidoAnual = $this->consumoHelper->obtenerConsumoAnual(
-                $anio,
-                $presupuesto['detalle_periodo_actual']['fecha_consumo_desde'] ?? null,
-                $presupuesto['detalle_periodo_actual']['fecha_consumo_hasta'] ?? null
-            );
-            $disponibleAnual = $presupuesto['monto_anual'] - $consumidoAnual;
+            // Validar anual — solo si el tipo de apoyo tiene límite mensual.
+            // Si no tiene límite mensual, se permite aunque quede negativo.
+            $aplicaLimite = $this->consumoHelper->aplicaLimiteMensual($tipoapoyoid);
 
-            if ($monto > $disponibleAnual) {
-                return [
-                    'valido'  => false,
-                    'mensaje' => 'El monto excede el presupuesto anual disponible (Disponible: Q'
-                        . number_format($disponibleAnual, 2) . ')'
-                ];
-            }
+            if ($aplicaLimite) {
+                $consumidoAnual = $this->consumoHelper->obtenerConsumoAnual(
+                    $anio,
+                    $presupuesto['detalle_periodo_actual']['fecha_consumo_desde'] ?? null,
+                    $presupuesto['detalle_periodo_actual']['fecha_consumo_hasta'] ?? null
+                );
+                $disponibleAnual = $presupuesto['monto_anual'] - $consumidoAnual;
 
-            // Validar mensual (si aplica)
-            if ($this->consumoHelper->aplicaLimiteMensual($tipoapoyoid)) {
+                if ($monto > $disponibleAnual) {
+                    return [
+                        'valido'  => false,
+                        'mensaje' => 'El monto excede el presupuesto anual disponible (Disponible: Q'
+                            . number_format($disponibleAnual, 2) . ')'
+                    ];
+                }
+
+                // Validar mensual
                 $presupuestoMensual = $this->presupuestoMensualHelper->calcular($presupuesto);
 
                 if ($monto > $presupuestoMensual['disponible']) {

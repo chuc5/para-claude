@@ -199,8 +199,7 @@ class MantenimientoLiquidacionesHelper
             ag.nombre  AS agencia,
             pu.nombre  AS puesto,
             pg.monto_mensual,
-            pg.monto_anual,
-            pg.monto_diario
+            pg.monto_anual
         FROM apoyo_combustibles.usuarioscontrolfechas AS ucf
         LEFT JOIN dbintranet.agencia AS ag
             ON ag.idAgencia = ucf.agenciaid
@@ -248,8 +247,7 @@ class MantenimientoLiquidacionesHelper
             ag.nombre  AS agencia,
             pu.nombre  AS puesto,
             pg.monto_mensual,
-            pg.monto_anual,
-            pg.monto_diario
+            pg.monto_anual
         FROM apoyo_combustibles.usuarioscontrolfechas AS ucf
         LEFT JOIN dbintranet.agencia AS ag
             ON ag.idAgencia = ucf.agenciaid
@@ -288,7 +286,6 @@ class MantenimientoLiquidacionesHelper
 
         $sql = "SELECT
             pg.monto_anual,
-            pg.monto_diario,
             ag.nombre    AS agencia,
             pu.nombre    AS puesto,
             pg.agenciaid,
@@ -314,7 +311,7 @@ class MantenimientoLiquidacionesHelper
             'agencia'                 => $pg['agencia'] ?? $usuario['Agencia'],
             'puesto'                  => $pg['puesto'] ?? $usuario['Puesto'],
             'monto_anual'             => (float) ($pg['monto_anual'] ?? 0),
-            'monto_diario'            => (float) ($pg['monto_diario'] ?? 0),
+            'monto_mensual'           => (float) ($pg['monto_mensual'] ?? 0),
             'es_nuevo'                => false,
             'porcentaje_presupuesto'  => 100,
             'dias_presupuesto'        => 0,
@@ -358,6 +355,11 @@ class MantenimientoLiquidacionesHelper
             return [[
                 'inicio'       => $inicioPeriodo,
                 'fin'          => $finPeriodo,
+                // inicio_real: inicio real del UCF (puede ser antes del rango de análisis)
+                // fin_real: cappado al fin del rango de análisis — evita calcular presupuesto
+                //           hasta el egreso anual cuando el período sigue activo
+                'inicio_real'  => $periodo['inicio_efectivo'],
+                'fin_real'     => $finPeriodo,
                 'tipo_periodo' => $periodo['tipo_periodo'] === 'sin_registros'
                     ? 'sin_registros'
                     : 'normal',
@@ -378,23 +380,34 @@ class MantenimientoLiquidacionesHelper
 
         if ($inicioSub1 <= $finSub1) {
             $subPeriodos[] = [
-                'inicio'       => $inicioSub1,
-                'fin'          => $finSub1,
+                // inicio/fin: recortados al rango de análisis (para filtrar liquidaciones)
+                'inicio'      => $inicioSub1,
+                'fin'         => $finSub1,
+                // inicio_real: inicio real del UCF (puede ser antes del rango de análisis)
+                // fin_real: fin real del sub-período de prueba. Si el usuario tuvo egreso
+                //           anticipado (antes del fin natural de prueba), se usa ese egreso
+                //           para que calcularPorRango aplique calcularRangoPruebaAcumulado
+                //           con el denominador correcto pero solo los días laborados.
+                'inicio_real' => $periodo['inicio_efectivo'],
+                'fin_real'    => $finSub1,
                 'tipo_periodo' => 'prueba',
             ];
         }
 
         // ── Sub-período POST-PRUEBA ───────────────────────────────────────
-        $inicioSub2 = (clone $fechaFinPrueba)->modify('+1 day')->format('Y-m-d');
-        $finSub2    = $finPeriodo;
-
-        // Recortar inicio al rango de análisis si la prueba terminó antes
-        $inicioSub2 = max($inicioSub2, $fechaDesde);
+        $strPostPrueba = (clone $fechaFinPrueba)->modify('+1 day')->format('Y-m-d');
+        $inicioSub2    = max($strPostPrueba, $fechaDesde);
+        $finSub2       = $finPeriodo;
 
         if ($inicioSub2 <= $finSub2) {
             $subPeriodos[] = [
-                'inicio'       => $inicioSub2,
-                'fin'          => $finSub2,
+                'inicio'      => $inicioSub2,
+                'fin'         => $finSub2,
+                // inicio_real: inicio real del post-prueba (día siguiente al fin de prueba)
+                // fin_real: cappado al fin del rango de análisis — sin esto se calcula hasta
+                //           el egreso anual (ej: dic 31) inflando días y presupuesto
+                'inicio_real' => $strPostPrueba,
+                'fin_real'    => $finSub2,
                 'tipo_periodo' => 'post_prueba',
             ];
         }
@@ -404,6 +417,8 @@ class MantenimientoLiquidacionesHelper
             return [[
                 'inicio'       => $inicioPeriodo,
                 'fin'          => $finPeriodo,
+                'inicio_real'  => $periodo['inicio_efectivo'],
+                'fin_real'     => $periodo['fin_efectivo'],
                 'tipo_periodo' => 'normal',
             ]];
         }
@@ -549,27 +564,49 @@ class MantenimientoLiquidacionesHelper
     // =========================================================================
     // CONSTRUCCIÓN DE FILAS
     // =========================================================================
-
     /**
      * Construye el array de una fila de período (sin liquidaciones detalladas).
      * Reutilizado por listarMantenimientoPorPeriodos y obtenerDetalle.
      *
-     * Delega el cálculo de presupuesto a PresupuestoRangoHelper::calcularPorRango()
+     * Delega el cálculo de presupuesto a PresupuestoRangoHelper.
+     *
+     * Modo acumulado: cuando tipo_periodo = 'prueba' y el período de prueba
+     * aún está activo (hoy <= fin_real), calcula el presupuesto y el consumo
+     * solo hasta la fecha actual usando calcularRangoPruebaAcumulado().
+     * Si ya terminó la prueba, siempre se usa el total completo.
      *
      * @param array $periodo              Período mapeado completo
-     * @param array $sub                  Sub-período [ 'inicio', 'fin', 'tipo_periodo' ]
-     * @param array $usuario              Datos del usuario (puede estar vacío para el modal)
+     * @param array $sub                  Sub-período [ inicio, fin, tipo_periodo, ... ]
+     * @param array $usuario              Datos del usuario
      * @param array $liquidacionesUsuario Liquidaciones ya cargadas del usuario
-     * @return array
+     * @param float $montoExtaordinarios  Monto de registros_extraordinarios del UCF
+     * @param bool  $modoAcumulado        Si true, aplica corte a hoy en pruebas activas
      */
     public function construirFilaPeriodo(
         array $periodo,
         array $sub,
         array $usuario,
-        array $liquidacionesUsuario
+        array $liquidacionesUsuario,
+        float $montoExtaordinarios = 0.0,
+        bool  $modoAcumulado       = true   // true: en prueba activa muestra acumulado hasta hoy
     ): array {
+        $hoy           = date('Y-m-d');
+        $inicioFiltro  = $sub['inicio_real'] ?? $sub['inicio'];
+        $finFiltro     = $sub['fin_real']    ?? $sub['fin'];
+        $inicioCalculo = $inicioFiltro;
+        $finCalculo    = $finFiltro;
+
+        // Determinar si la prueba sigue activa y si aplica el modo acumulado.
+        // Condición: sub-período de prueba + hoy está antes del fin real de prueba.
+        $enPruebaActiva = $sub['tipo_periodo'] === 'prueba' && $hoy < $finFiltro;
+        $aplicarCorte   = $modoAcumulado && $enPruebaActiva;
+
+        // En modo acumulado con prueba activa, el filtro de liquidaciones
+        // también se corta a hoy para que consumo y presupuesto sean consistentes.
+        $finFiltroEfectivo = $aplicarCorte ? $hoy : $finFiltro;
+
         $liquidacionesSub = $this->filtrarLiquidacionesPorRango(
-            $liquidacionesUsuario, $sub['inicio'], $sub['fin']
+            $liquidacionesUsuario, $inicioFiltro, $finFiltroEfectivo
         );
 
         // Calcular totales del sub-período
@@ -589,18 +626,34 @@ class MantenimientoLiquidacionesHelper
             }
         }
 
-        $totalLiquidado = $totalAprobadas + $totalDeBaja;
+        // Los extraordinarios se suman al consumo solo en el sub-período de prueba
+        $totalExtaordinarios = ($sub['tipo_periodo'] === 'prueba') ? $montoExtaordinarios : 0.0;
+        $totalLiquidado      = $totalAprobadas + $totalDeBaja + $totalExtaordinarios;
 
-        // ── DELEGADO A PresupuestoRangoHelper ──
-        $presupuestoAsignado = $this->presupuestoRangoHelper->calcularPorRango(
-            $periodo, $sub['inicio'], $sub['fin']
-        );
+        // ── PRESUPUESTO ───────────────────────────────────────────────────────
+        if ($aplicarCorte) {
+            // Acumulado hasta hoy: denominador combinado del período completo,
+            // pero días contados hasta la fecha actual.
+            $porcentaje          = $periodo['porcentaje_presupuesto'] / 100;
+            $presupuestoAsignado = $this->presupuestoRangoHelper->calcularRangoPruebaAcumulado(
+                $inicioCalculo,
+                $finCalculo,
+                (float) ($periodo['monto_mensual'] ?? 0),
+                $porcentaje,
+                $hoy
+            );
+        } else {
+            // Comportamiento original: presupuesto total del sub-período
+            $presupuestoAsignado = $this->presupuestoRangoHelper->calcularPorRango(
+                $periodo, $inicioCalculo, $finCalculo
+            );
+        }
 
-        $diferencia = $presupuestoAsignado - $totalLiquidado;
+        $diferencia  = $presupuestoAsignado - $totalLiquidado;
 
-        $dtI = new \DateTime($sub['inicio']);
-        $dtF = new \DateTime($sub['fin']);
-        $diasPeriodo = $dtI->diff($dtF)->days + 1;
+        // Los días se calculan sobre el rango efectivo (recortado a hoy si aplica)
+        $finDias     = $aplicarCorte ? $hoy : $finCalculo;
+        $diasPeriodo = (new \DateTime($inicioCalculo))->diff(new \DateTime($finDias))->days + 1;
 
         // El porcentaje visible solo aplica en sub-períodos de prueba
         $porcentajeVisible = $sub['tipo_periodo'] === 'prueba'
@@ -608,7 +661,7 @@ class MantenimientoLiquidacionesHelper
             : 100.0;
 
         return [
-            // Identificación del usuario (puede estar vacío en el modal)
+            // Identificación del usuario
             'usuarioid'      => $periodo['usuarioid'] ?? null,
             'CodigoCliente'  => $usuario['CodigoCliente'] ?? null,
             'NombreUsuario'  => $usuario['NombreUsuario'] ?? null,
@@ -630,18 +683,26 @@ class MantenimientoLiquidacionesHelper
             'dias_periodo'       => $diasPeriodo,
 
             // Configuración presupuestal
-            'es_nuevo'                => (bool) ($periodo['es_nuevo'] ?? false),
-            'porcentaje_presupuesto'  => $porcentajeVisible,
-            'dias_presupuesto'        => (int) ($periodo['dias_presupuesto'] ?? 0),
-            'presupuesto_diario'      => round((float) ($periodo['monto_diario'] ?? 0), 2),
+            'es_nuevo'               => (bool) ($periodo['es_nuevo'] ?? false),
+            'porcentaje_presupuesto' => $porcentajeVisible,
+            'dias_presupuesto'       => (int) ($periodo['dias_presupuesto'] ?? 0),
+            'presupuesto_diario'     => round(
+                (float) ($periodo['monto_mensual'] ?? 0) / (int) (new \DateTime($inicioCalculo))->format('t'),
+                2
+            ),
+
+            // Modo acumulado: informa al frontend si el dato está cortado a hoy
+            'es_acumulado'        => $aplicarCorte,
+            'fecha_corte'         => $aplicarCorte ? $hoy : null,
 
             // Comparativa financiera
-            'presupuesto_asignado' => round($presupuestoAsignado, 2),
-            'total_aprobadas'      => round($totalAprobadas, 2),
-            'total_de_baja'        => round($totalDeBaja, 2),
-            'total_liquidado'      => round($totalLiquidado, 2),
-            'diferencia'           => round($diferencia, 2),
-            'requiere_ajuste'      => $diferencia < 0,
+            'presupuesto_asignado'  => round($presupuestoAsignado, 2),
+            'total_aprobadas'       => round($totalAprobadas, 2),
+            'total_de_baja'         => round($totalDeBaja, 2),
+            'total_extraordinarios' => round($totalExtaordinarios, 2),
+            'total_liquidado'       => round($totalLiquidado, 2),
+            'diferencia'            => round($diferencia, 2),
+            'requiere_ajuste'       => $diferencia < 0,
 
             // Conteos
             'cant_aprobadas' => $cantAprobadas,
@@ -761,6 +822,63 @@ class MantenimientoLiquidacionesHelper
         return $fila;
     }
 
+
+    // =========================================================================
+    // REGISTROS EXTRAORDINARIOS
+    // =========================================================================
+
+    /**
+     * Retorna el monto total de extraordinarios activos y no cancelados
+     * vinculados a un UCF específico.
+     *
+     * @param int $ucfId
+     * @return float
+     */
+    public function obtenerExtaordinariosPorUCF(int $ucfId): float
+    {
+        if ($ucfId <= 0) return 0.0;
+
+        $sql = "SELECT COALESCE(SUM(re.monto), 0)
+                FROM apoyo_combustibles.registros_extraordinarios re
+                WHERE re.ucfid  = ?
+                  AND re.activo = 1
+                  AND re.estado != 'cancelado'";
+
+        $stmt = $this->connect->prepare($sql);
+        $stmt->execute([$ucfId]);
+        return (float) $stmt->fetchColumn();
+    }
+
+    /**
+     * Retorna un mapa [ ucfId => monto_extraordinarios ] para un conjunto
+     * de UCFs. Los que no tienen registros quedan en 0.0.
+     *
+     * @param int[] $ucfIds
+     * @return array [ ucfId => float ]
+     */
+    public function obtenerExtaordinariosMultiplesUCFs(array $ucfIds): array
+    {
+        if (empty($ucfIds)) return [];
+
+        $placeholders = implode(',', array_fill(0, count($ucfIds), '?'));
+
+        $sql = "SELECT re.ucfid, COALESCE(SUM(re.monto), 0) AS total
+                FROM apoyo_combustibles.registros_extraordinarios re
+                WHERE re.ucfid  IN ($placeholders)
+                  AND re.activo = 1
+                  AND re.estado != 'cancelado'
+                GROUP BY re.ucfid";
+
+        $stmt = $this->connect->prepare($sql);
+        $stmt->execute($ucfIds);
+
+        $resultado = array_fill_keys($ucfIds, 0.0);
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $resultado[(int) $row['ucfid']] = (float) $row['total'];
+        }
+        return $resultado;
+    }
+
     // =========================================================================
     // MÉTODOS PRIVADOS
     // =========================================================================
@@ -798,7 +916,7 @@ class MantenimientoLiquidacionesHelper
                 'puesto'                  => $row['puesto'],
                 'monto_mensual'           => (float) ($row['monto_mensual'] ?? 0),
                 'monto_anual'             => (float) ($row['monto_anual']   ?? 0),
-                'monto_diario'            => (float) ($row['monto_diario']  ?? 0),
+
                 'es_nuevo'                => (bool)  $row['es_nuevo'],
                 'porcentaje_presupuesto'  => (int)   $row['porcentaje_presupuesto'],
                 'dias_presupuesto'        => (int)   $row['dias_presupuesto'],
@@ -896,10 +1014,9 @@ class MantenimientoLiquidacionesHelper
         $presupuestoAsignado = $this->presupuestoRangoHelper->calcularPorRango(
             $periodoSimple, $inicioCurso, $finCurso
         );
-        $presupuestoDiario = (float) ($pg['monto_diario'] ?? 0);
-
         $dtI  = new \DateTime($inicioCurso);
         $dtF  = new \DateTime($finCurso);
+        $presupuestoDiario = round((float) ($pg['monto_mensual'] ?? 0) / (int) $dtI->format('t'), 2);
         $dias = $dtI->diff($dtF)->days + 1;
 
         $liquidacionesCurso = $this->filtrarLiquidacionesPorRango(

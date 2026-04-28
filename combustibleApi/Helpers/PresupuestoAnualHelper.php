@@ -11,13 +11,13 @@ use PDO;
  * CAMBIO PRINCIPAL: Usa tarifa diaria variable según el mes:
  *   tarifa_diaria(mes) = monto_mensual / días_del_mes
  *
- * Esto reemplaza la tarifa fija anterior (monto_anual / 365).
- *
  * ESCENARIOS:
  * ┌──────────┬────────────────────────────────────────────────────┐
  * │ 1        │ Sin registros UCF → presupuesto mensual completo   │
  * │ 2/3/3b   │ Período activo → calcula según etapa              │
- * │ 4        │ Post-egreso → desde día siguiente al egreso        │
+ * │          │ + suma UCFs completados del mismo año              │
+ * │ 4        │ Sin período activo pero con históricos en el año   │
+ * │          │ → solo días efectivamente activos (sin post-egreso)│
  * │ 5        │ Histórico → suma todos los períodos del año        │
  * └──────────┴────────────────────────────────────────────────────┘
  */
@@ -40,7 +40,15 @@ class PresupuestoAnualHelper
     // MÉTODO PRINCIPAL
     // ═══════════════════════════════════════════════════════════════
 
-    public function obtener($anio)
+    /**
+     * @param int  $anio
+     * @param bool $soloProba  Si true y el usuario está en período de prueba activo,
+     *                         solo devuelve el presupuesto de ese período de prueba
+     *                         (sin sumar períodos anteriores del año).
+     *                         Usar true en el flujo de liquidaciones del usuario.
+     *                         Usar false (default) en vistas administrativas.
+     */
+    public function obtener($anio, bool $soloProba = false)
     {
         try {
             $hoy     = new \DateTime();
@@ -51,13 +59,37 @@ class PresupuestoAnualHelper
             }
 
             $periodoActivo = $this->_buscarPeriodoActivo($anio);
+
             if ($periodoActivo) {
-                return $this->_dinamico($periodoActivo, $anio);
+                $resultado = $this->_dinamico($periodoActivo, $anio);
+                if (!$resultado) return null;
+
+                // En modo soloProba + prueba activa: NO sumar períodos anteriores.
+                // El usuario solo ve el presupuesto de su período de prueba actual.
+                $enPrueba = $resultado['detalle_periodo_actual']['en_periodo_prueba'] ?? false;
+
+                if (!$soloProba || !$enPrueba) {
+                    // Fuera de prueba (o vista admin): sumar períodos anteriores del año
+                    $extras = $this->_sumarPeriodosAnterioresEnAnio($periodoActivo, $anio);
+                    if ($extras > 0) {
+                        $resultado['monto_anual'] = round(
+                            ($resultado['monto_anual'] ?? 0) + $extras, 2
+                        );
+                        if (isset($resultado['detalle_periodo_actual']['presupuesto_total_disponible'])) {
+                            $resultado['detalle_periodo_actual']['presupuesto_total_disponible'] =
+                                $resultado['monto_anual'];
+                        }
+                    }
+                }
+
+                return $resultado;
             }
 
-            $periodoVencido = $this->_buscarUltimoPeriodoVencido($anio);
-            if ($periodoVencido) {
-                return $this->_postEgreso($periodoVencido, $anio);
+            // Sin período activo → verificar si hubo períodos en el año
+            $todosPeriodos = $this->_buscarTodosLosPeriodos($anio);
+            if (!empty($todosPeriodos)) {
+                // Solo sumar los días que estuvo activo, sin post-egreso
+                return $this->_soloHistoricosAnioActual($todosPeriodos, $anio);
             }
 
             return $this->_sinRegistros($anio);
@@ -208,7 +240,6 @@ class PresupuestoAnualHelper
             $fechaInicioCalculo = (clone $fechaFinPrueba)->modify('+1 day');
             $porcentajePrueba   = $periodo['porcentaje_presupuesto'] / 100;
 
-            // Tramo prueba usa lógica de meses completos
             $presupuestoTramoPrueba = $this->_calcularPresupuestoPruebaTotal(
                 $fechaIngreso->format('Y-m-d'),
                 $fechaFinPrueba->format('Y-m-d'),
@@ -242,7 +273,6 @@ class PresupuestoAnualHelper
             $detalle['fecha_consumo_hasta'] = null;
         }
 
-        // Tramo normal usa tarifa mensual variable
         $presupuestoTramoNormal = 0.0;
         if ($fechaEgreso >= $fechaInicioCalculo) {
             $presupuestoTramoNormal = $this->_calcularPorRangoMensual(
@@ -272,59 +302,6 @@ class PresupuestoAnualHelper
         $detalle['fecha_fin_calculo']    = $fechaEgreso->format('Y-m-d');
 
         return $presupuestoTramoPrueba + $presupuestoTramoNormal;
-    }
-
-    /**
-     * Presupuesto post-egreso: desde día siguiente al egreso hasta fin de año.
-     */
-    private function _postEgreso($periodoVencido, $anio)
-    {
-        try {
-            $finAnio      = new \DateTime("$anio-12-31");
-            $fechaEgreso  = new \DateTime($periodoVencido['fecha_egreso']);
-            $fechaInicio  = (clone $fechaEgreso)->modify('+1 day');
-
-            if ($fechaInicio > $finAnio) return null;
-
-            $montoMensual    = (float) $periodoVencido['monto_mensual'];
-            $presupuestoTotal = $this->_calcularPorRangoMensual(
-                $fechaInicio->format('Y-m-d'),
-                $finAnio->format('Y-m-d'),
-                $montoMensual
-            );
-            $diasRestantes = (int) $fechaInicio->diff($finAnio)->days + 1;
-
-            $detalle = [
-                'periodo_actual'          => 'post_egreso',
-                'periodo_origen_id'       => $periodoVencido['idUsuariosControlFechas'],
-                'fecha_egreso_anterior'   => $fechaEgreso->format('Y-m-d'),
-                'fecha_inicio_calculo'    => $fechaInicio->format('Y-m-d'),
-                'fecha_fin_calculo'       => $finAnio->format('Y-m-d'),
-                'dias_restantes'          => $diasRestantes,
-                'presupuesto_mensual'     => round($montoMensual, 2),
-                'presupuesto_total_disponible' => round($presupuestoTotal, 2),
-                'agencia'                 => $periodoVencido['agencia'],
-                'puesto'                  => $periodoVencido['puesto'],
-            ];
-
-            return [
-                'idPresupuestoGeneral'   => null,
-                'agenciaid'              => $periodoVencido['agenciaid'],
-                'puestoid'               => $periodoVencido['puestoid'],
-                'anio'                   => $anio,
-                'monto_mensual'          => $montoMensual,
-                'monto_anual'            => round($presupuestoTotal, 2),
-                'monto_diario'           => $periodoVencido['monto_diario'],
-                'agencia'                => $periodoVencido['agencia'],
-                'puesto'                 => $periodoVencido['puesto'],
-                'tiene_periodos'         => true,
-                'detalle_periodo_actual' => $detalle,
-            ];
-
-        } catch (Exception $e) {
-            error_log("Error en PresupuestoAnualHelper::_postEgreso: " . $e->getMessage());
-            return null;
-        }
     }
 
     /**
@@ -383,7 +360,100 @@ class PresupuestoAnualHelper
         }
     }
 
-    // ------------------------------------------------------------
+    /**
+     * Sin período activo pero con UCFs históricos en el año actual.
+     * Suma solo los días efectivamente activos; no agrega presupuesto post-egreso.
+     *
+     * @param array $periodos UCFs del año (ya completados)
+     * @param int   $anio
+     * @return array|null
+     */
+    private function _soloHistoricosAnioActual(array $periodos, int $anio): ?array
+    {
+        try {
+            $inicioAnio = new \DateTime("$anio-01-01");
+            $finAnio    = new \DateTime("$anio-12-31");
+
+            $presupuestoTotal = 0.0;
+            $detallePeriodos  = [];
+            $ultimoPeriodo    = end($periodos);
+            $primerPeriodo    = reset($periodos);
+
+            foreach ($periodos as $periodo) {
+                $detalle           = $this->_calcularUnPeriodoHistorico($periodo, $inicioAnio, $finAnio);
+                $presupuestoTotal += $detalle['presupuesto_periodo'];
+                $detallePeriodos[] = $detalle;
+            }
+
+            $esBisiesto = (($anio % 4 === 0 && $anio % 100 !== 0) || ($anio % 400 === 0));
+            $diasAnio   = $esBisiesto ? 366 : 365;
+
+            // fecha_consumo_desde: mayor entre inicio de año y fecha_ingreso del primer UCF
+            $fechaConsumoDesde = max($primerPeriodo['fecha_ingreso'], "$anio-01-01");
+            $fechaConsumoHasta = $ultimoPeriodo['fecha_egreso'];   // ya egresó, tiene fecha
+
+            return [
+                'idPresupuestoGeneral'   => null,
+                'agenciaid'              => $ultimoPeriodo['agenciaid'],
+                'puestoid'               => $ultimoPeriodo['puestoid'],
+                'anio'                   => $anio,
+                'monto_mensual'          => (float) $ultimoPeriodo['monto_mensual'],
+                'monto_anual'            => round($presupuestoTotal, 2),
+                'monto_diario'           => round($presupuestoTotal / $diasAnio, 6),
+                'agencia'                => $ultimoPeriodo['agencia'],
+                'puesto'                 => $ultimoPeriodo['puesto'],
+                'tiene_periodos'         => true,
+                'detalle_periodo_actual' => [
+                    'periodo_actual'               => 'sin_periodo_activo',
+                    'presupuesto_total_disponible' => round($presupuestoTotal, 2),
+                    'fecha_consumo_desde'          => $fechaConsumoDesde,
+                    'fecha_consumo_hasta'          => $fechaConsumoHasta,
+                    'en_periodo_prueba'            => false,
+                    'agencia'                      => $ultimoPeriodo['agencia'],
+                    'puesto'                       => $ultimoPeriodo['puesto'],
+                ],
+                'detalle_periodos'       => $detallePeriodos,
+            ];
+
+        } catch (Exception $e) {
+            error_log("Error en PresupuestoAnualHelper::_soloHistoricosAnioActual: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Suma el presupuesto de todos los UCFs completados en el año,
+     * excluyendo el período activo (que ya fue calculado en _dinamico).
+     *
+     * @param array $periodoActivo UCF activo actual
+     * @param int   $anio
+     * @return float Suma del presupuesto de períodos anteriores
+     */
+    private function _sumarPeriodosAnterioresEnAnio(array $periodoActivo, int $anio): float
+    {
+        try {
+            $todos      = $this->_buscarTodosLosPeriodos($anio);
+            $inicioAnio = new \DateTime("$anio-01-01");
+            $finAnio    = new \DateTime("$anio-12-31");
+            $total      = 0.0;
+
+            foreach ($todos as $p) {
+                // Saltar el período activo, ya fue calculado en _dinamico
+                if ((int) $p['idUsuariosControlFechas'] === (int) $periodoActivo['idUsuariosControlFechas']) {
+                    continue;
+                }
+
+                $detalle = $this->_calcularUnPeriodoHistorico($p, $inicioAnio, $finAnio);
+                $total  += $detalle['presupuesto_periodo'];
+            }
+
+            return $total;
+
+        } catch (Exception $e) {
+            error_log("Error en PresupuestoAnualHelper::_sumarPeriodosAnterioresEnAnio: " . $e->getMessage());
+            return 0.0;
+        }
+    }
 
     /**
      * NUEVO MÉTODO — Calcula el presupuesto total del período de prueba.
@@ -392,8 +462,7 @@ class PresupuestoAnualHelper
      * - Cada mes COMPLETO dentro del período = prueba_mensual (monto_mensual × porcentaje)
      * - Los meses PARCIALES (inicio y/o fin) juntos = 1 × prueba_mensual
      *
-     * Esto garantiza que el total sea siempre:
-     *   (meses_completos + 1_si_hay_parciales) × prueba_mensual
+     * Esta fórmula NO usa tarifa diaria variable; es intencional.
      *
      * Ejemplo: Feb 15 → Abr 14  (50%, Q1,000 mensual)
      *   - Feb parcial + Abr parcial = 1 × Q500
@@ -414,9 +483,9 @@ class PresupuestoAnualHelper
     ): float {
         if ($montoMensual <= 0 || $porcentaje <= 0) return 0.0;
 
-        $pruebaMensual    = $montoMensual * $porcentaje;
-        $inicio           = new \DateTime($fechaInicio);
-        $fin              = new \DateTime($fechaFin);
+        $pruebaMensual = $montoMensual * $porcentaje;
+        $inicio        = new \DateTime($fechaInicio);
+        $fin           = new \DateTime($fechaFin);
 
         if ($inicio > $fin) return 0.0;
 
@@ -426,17 +495,15 @@ class PresupuestoAnualHelper
         $cursor = new \DateTime($inicio->format('Y-m-01'));
 
         while ($cursor <= $fin) {
-            $diasDelMes  = (int) $cursor->format('t');
-            $primerDia   = clone $cursor;
-            $ultimoDia   = new \DateTime(
+            $diasDelMes = (int) $cursor->format('t');
+            $primerDia  = clone $cursor;
+            $ultimoDia  = new \DateTime(
                 $cursor->format('Y-m-') . str_pad($diasDelMes, 2, '0', STR_PAD_LEFT)
             );
 
-            // Mes completo: empieza dentro del rango Y termina dentro del rango
             if ($primerDia >= $inicio && $ultimoDia <= $fin) {
                 $totalMesesCompletos++;
             } else {
-                // Mes parcial: cruza un borde del período
                 $hayMesesParciales = true;
             }
 
@@ -480,7 +547,7 @@ class PresupuestoAnualHelper
                 'puesto'                => $presupuesto['puesto'],
                 'tiene_periodos'        => false,
                 'detalle_periodo_actual' => [
-                    'periodo_actual'             => 'sin_registros',
+                    'periodo_actual'               => 'sin_registros',
                     'presupuesto_total_disponible' => (float) $presupuesto['monto_anual'],
                 ],
             ];
@@ -532,7 +599,7 @@ class PresupuestoAnualHelper
                 $strFinPrueba = $fechaFinRestriccion->format('Y-m-d');
                 $strIniNormal = (clone $fechaFinRestriccion)->modify('+1 day')->format('Y-m-d');
 
-                // Tramo prueba: lógica de meses completos
+                // Tramo prueba: fórmula de meses completos/parciales (intacta)
                 $presupuestoPrueba = $this->_calcularPresupuestoPruebaTotal(
                     $fechaIngreso->format('Y-m-d'),
                     $strFinPrueba,
@@ -718,15 +785,12 @@ class PresupuestoAnualHelper
             $diasDelMes   = (int) $cursor->format('t');
             $tarifaDiaria = $montoMensual / $diasDelMes;
 
-            // Inicio efectivo en este mes
             $iniEf = ($cursor < $inicio) ? clone $inicio : clone $cursor;
 
-            // Último día del mes actual
             $finMes = new \DateTime(
                 $cursor->format('Y-m-') . str_pad($diasDelMes, 2, '0', STR_PAD_LEFT)
             );
 
-            // Fin efectivo en este mes
             $finEf = ($finMes < $fin) ? clone $finMes : clone $fin;
 
             $dias = (int) $iniEf->diff($finEf)->days + 1;

@@ -30,26 +30,46 @@ class ConsumoHelper
     public function obtenerRangoPeriodoConsumo(): array
     {
         try {
-            // Inicio: created_at del último comprobante registrado
-            // Si no existe ninguno, inicio de año
+            // Último comprobante registrado (con hora exacta)
             $sqlDesde = "SELECT MAX(created_at)
-                     FROM apoyo_combustibles.comprobantescontables
-                     WHERE tipo = 'liquidacion'";
+                         FROM apoyo_combustibles.comprobantescontables
+                         WHERE tipo = 'liquidacion'";
             $stmt = $this->connect->prepare($sqlDesde);
             $stmt->execute();
-            $desde = $stmt->fetchColumn() ?: date('Y') . '-01-01';
+            $desdeComprobante = $stmt->fetchColumn() ?: (date('Y') . '-01-01 00:00:00');
 
-            // Fin: sin límite superior (cuenta hasta hoy)
-            // El siguiente comprobante aún no existe, por eso el usuario
-            // está consumiendo en este período abierto
+            // Fecha de ingreso del UCF activo (solo fecha, sin hora)
+            $sqlUcf = "SELECT fecha_ingreso
+                       FROM apoyo_combustibles.usuarioscontrolfechas
+                       WHERE usuarioid = ?
+                         AND activo    = 1
+                         AND fecha_ingreso <= CURDATE()
+                         AND (fecha_egreso IS NULL OR fecha_egreso >= CURDATE())
+                       ORDER BY fecha_ingreso DESC
+                       LIMIT 1";
+            $stmt = $this->connect->prepare($sqlUcf);
+            $stmt->execute([$this->idUsuario]);
+            $fechaIngresoUcf = $stmt->fetchColumn();
+
+            // desde = MAX(ultimo_comprobante_datetime, fecha_ingreso_ucf)
+            // El comprobante ya tiene hora; la fecha de ingreso se trata como inicio del día.
+            if ($fechaIngresoUcf) {
+                $desdeIngresoStr = $fechaIngresoUcf . ' 00:00:00';
+                $desde = $desdeComprobante >= $desdeIngresoStr
+                    ? $desdeComprobante
+                    : $desdeIngresoStr;
+            } else {
+                $desde = $desdeComprobante;
+            }
+
             return [
                 'desde' => $desde,
                 'hasta' => null,
             ];
 
-        } catch (Exception $e) {
+        } catch (\Exception $e) {
             error_log("Error en ConsumoHelper::obtenerRangoPeriodoConsumo: " . $e->getMessage());
-            return ['desde' => date('Y') . '-01-01', 'hasta' => null];
+            return ['desde' => date('Y') . '-01-01 00:00:00', 'hasta' => null];
         }
     }
 

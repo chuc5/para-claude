@@ -4,22 +4,9 @@ namespace App\combustibleApi\Helpers;
 
 /**
  * MensajeContextualHelper - Generación de mensajes según período
- *
- * Genera mensajes descriptivos para el usuario basándose
- * en su período laboral actual (prueba, post-prueba, normal, etc.)
- *
- * @package App\combustibleApi\Helpers
- * @author  Sistema de Combustibles
- * @version 1.0.0
  */
 class MensajeContextualHelper
 {
-    /**
-     * Genera un mensaje contextual según el período actual del usuario
-     *
-     * @param array $presupuesto Datos del presupuesto con detalle_periodo_actual
-     * @return string Mensaje descriptivo para el usuario
-     */
     public static function obtener($presupuesto)
     {
         if (!isset($presupuesto['detalle_periodo_actual'])) {
@@ -38,6 +25,8 @@ class MensajeContextualHelper
                 return self::_mensajeNormal($detalle);
             case 'post_egreso':
                 return self::_mensajePostEgreso($detalle);
+            case 'sin_periodo_activo':
+                return self::_mensajeSinPeriodoActivo($detalle);
             case 'sin_registros':
                 return 'Presupuesto anual completo disponible.';
             default:
@@ -85,6 +74,15 @@ class MensajeContextualHelper
             $detalle['fecha_inicio_calculo'],
             $detalle['fecha_fin_calculo'],
             $detalle['dias_restantes']
+        );
+    }
+
+    private static function _mensajeSinPeriodoActivo($detalle)
+    {
+        return sprintf(
+            'Ya no cuenta con un período activo en el sistema. El presupuesto mostrado corresponde únicamente a los días que estuvo activo (del %s al %s).',
+            $detalle['fecha_consumo_desde'] ?? '—',
+            $detalle['fecha_consumo_hasta'] ?? '—'
         );
     }
 }
