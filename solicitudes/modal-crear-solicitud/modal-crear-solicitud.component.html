@@ -1,0 +1,193 @@
+<!-- Overlay -->
+<div @overlay class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+    (click)="cerrarModal()">
+
+    <!-- Modal -->
+    <div @modal class="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        (click)="$event.stopPropagation()">
+
+        <!-- ================================================================ -->
+        <!-- HEADER                                                            -->
+        <!-- ================================================================ -->
+        <div class="flex items-center justify-between p-5 border-b border-gray-200
+                    sticky top-0 bg-white z-10">
+            <h2 class="text-lg font-bold text-gray-900">Nueva Solicitud</h2>
+            <button (click)="cerrarModal()" [disabled]="guardando()"
+                class="text-gray-400 hover:text-gray-600 transition disabled:opacity-50">
+                <lucide-icon [img]="X" class="w-5 h-5"></lucide-icon>
+            </button>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- BODY                                                              -->
+        <!-- ================================================================ -->
+        <div class="p-5 space-y-5">
+
+            <!-- Tarjeta del producto -->
+            <div class="bg-gray-50 rounded-lg border border-gray-200 p-4">
+                <div class="flex items-start gap-3">
+                    <div class="w-9 h-9 bg-indigo-100 rounded-lg flex items-center
+                                justify-center flex-shrink-0 mt-0.5">
+                        <lucide-icon [img]="Package" class="w-4 h-4 text-indigo-600">
+                        </lucide-icon>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2 mb-1 flex-wrap">
+                            <span class="text-sm font-semibold text-gray-900 truncate">
+                                {{ producto.nombre }}
+                            </span>
+                            <span class="inline-flex items-center px-2 py-0.5 rounded-md
+                                         text-xs font-medium flex-shrink-0" [class]="claseTipo()">
+                                {{ producto.tipo }}
+                            </span>
+                        </div>
+                        <span class="text-xs text-gray-500">{{ producto.categoria }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error global -->
+            <div *ngIf="error()" class="flex items-start gap-2 p-3 bg-red-50 border border-red-200
+                        rounded-lg text-sm">
+                <lucide-icon [img]="AlertCircle" class="w-4 h-4 text-red-600 mt-0.5 flex-shrink-0">
+                </lucide-icon>
+                <span class="text-red-800">{{ error() }}</span>
+            </div>
+
+            <!-- Formulario -->
+            <form [formGroup]="form" (ngSubmit)="confirmar()" class="space-y-4">
+
+                <!-- Unidad de medida -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Unidad de medida <span class="text-red-500">*</span>
+                    </label>
+
+                    <!-- Skeleton mientras carga -->
+                    <div *ngIf="cargandoUnidades()" class="h-10 bg-gray-200 rounded-md animate-pulse">
+                    </div>
+
+                    <!-- Selector real -->
+                    <ng-select *ngIf="!cargandoUnidades()" formControlName="id_unidad" [items]="unidades()"
+                        bindLabel="nombre" bindValue="id_unidad" [searchable]="false" [clearable]="false"
+                        placeholder="Seleccionar unidad..." notFoundText="Sin unidades disponibles"
+                        [class.ng-invalid]="esInvalido('id_unidad')"
+                        [class.ng-touched]="form.get('id_unidad')?.touched">
+
+                        <!-- Opción personalizada: nombre + disponibilidad -->
+                        <ng-template ng-option-tmp let-u="item">
+                            <div class="flex items-center justify-between gap-3 py-0.5">
+                                <span class="font-medium text-gray-900">
+                                    {{ u.nombre }}
+                                    <span class="text-xs font-normal text-gray-500">
+                                        ({{ u.abreviatura }})
+                                    </span>
+                                </span>
+                                <span class="text-xs rounded-md px-1.5 py-0.5 border" [class]="claseDisponible()">
+                                    {{ u.cantidad_disponible }} disp.
+                                </span>
+                            </div>
+                        </ng-template>
+
+                    </ng-select>
+
+                    <p *ngIf="esInvalido('id_unidad')" class="mt-1 text-xs text-red-600">
+                        {{ obtenerError('id_unidad') }}
+                    </p>
+                </div>
+
+                <!-- Indicador de disponibilidad (aparece al seleccionar unidad) -->
+                <div *ngIf="unidadActiva()" class="flex items-center justify-between px-3 py-2.5 rounded-lg
+                            border text-sm" [class]="claseDisponible()">
+                    <span class="font-medium">Disponible en bodega</span>
+                    <span class="font-bold text-base">
+                        {{ disponible() }}
+                        <span class="text-sm font-normal ml-1">
+                            {{ unidadActiva()!.abreviatura }}
+                        </span>
+                    </span>
+                </div>
+
+                <!-- Cantidad -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Cantidad solicitada <span class="text-red-500">*</span>
+                        <span *ngIf="unidadActiva()" class="text-gray-400 font-normal ml-1">
+                            (máx. {{ disponible() }} {{ unidadActiva()!.abreviatura }})
+                        </span>
+                    </label>
+                    <input type="number" formControlName="cantidad" min="0.01" [max]="disponible()" step="1" placeholder="0" class="w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2
+                               focus:ring-indigo-500 disabled:bg-gray-50 disabled:text-gray-400 transition"
+                        [class.border-red-500]="esInvalido('cantidad')" [class.border-gray-300]="!esInvalido('cantidad')">
+                    <p *ngIf="esInvalido('cantidad')" class="mt-1 text-xs text-red-600">
+                        {{ obtenerError('cantidad') }}
+                    </p>
+                    <!-- Aviso sin stock -->
+                    <p *ngIf="unidadActiva() && disponible() === 0" class="mt-1 text-xs text-red-600">
+                        Esta unidad no tiene stock disponible en este momento.
+                    </p>
+                </div>
+
+                <!-- Observaciones -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Observaciones
+                        <span class="text-gray-400 font-normal">(opcional)</span>
+                    </label>
+                    <textarea formControlName="observaciones" rows="2" maxlength="500"
+                        placeholder="Motivo, urgencia u otra nota..." class="w-full px-3 py-2 border rounded-md text-sm resize-none
+                               focus:outline-none focus:ring-2 focus:ring-indigo-500
+                               transition" [class.border-red-500]="esInvalido('observaciones')"
+                        [class.border-gray-300]="!esInvalido('observaciones')">
+                    </textarea>
+                    <div class="flex justify-between mt-1">
+                        <p *ngIf="esInvalido('observaciones')" class="text-xs text-red-600">
+                            {{ obtenerError('observaciones') }}
+                        </p>
+                        <p class="text-xs text-gray-400 ml-auto">
+                            {{ form.get('observaciones')?.value?.length || 0 }}/500
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Nota para correlativos -->
+                <div *ngIf="esCorrelativo()" class="flex items-start gap-2 p-3 bg-purple-50 border
+                            border-purple-200 rounded-lg text-xs text-purple-800">
+                    <lucide-icon [img]="AlertCircle" class="w-4 h-4 text-purple-500 mt-0.5 flex-shrink-0">
+                    </lucide-icon>
+                    <p>
+                        Este producto tiene <strong>número de correlativo</strong>.
+                        El encargado de bodega asignará el rango de números
+                        al momento de la entrega.
+                    </p>
+                </div>
+
+            </form>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- FOOTER                                                            -->
+        <!-- ================================================================ -->
+        <div class="flex items-center justify-end gap-2 p-5 border-t border-gray-200
+                    bg-gray-50 sticky bottom-0">
+
+            <!-- Cancelar -->
+            <button type="button" (click)="cerrarModal()" [disabled]="guardando()" class="px-4 py-2 text-sm font-medium text-gray-700 bg-white border
+                       border-gray-300 rounded-md hover:bg-gray-50 transition
+                       disabled:opacity-50">
+                Cancelar
+            </button>
+
+            <!-- Confirmar -->
+            <button type="submit" (click)="confirmar()" [disabled]="form.invalid || guardando() || disponible() === 0"
+                class="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white
+                       bg-indigo-600 rounded-md hover:bg-indigo-700 transition
+                       disabled:opacity-50 disabled:cursor-not-allowed">
+                <lucide-icon [img]="ShoppingCart" class="w-4 h-4"></lucide-icon>
+                {{ textoBoton }}
+            </button>
+
+        </div>
+
+    </div>
+</div>
