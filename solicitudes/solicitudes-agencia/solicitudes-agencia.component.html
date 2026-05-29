@@ -399,10 +399,9 @@
                                     <td class="px-4 py-3">
                                         <div class="flex items-center justify-center gap-1">
                                             <!-- Ver detalle (Sprint 5) -->
-                                            <button (click)="verDetalle(s)" title="Ver detalle" class="p-1.5 text-blue-600 hover:bg-blue-50
-                                                       rounded transition">
-                                                <lucide-icon [img]="Eye" class="w-4 h-4">
-                                                </lucide-icon>
+                                            <button (click)="verDetalle(s)" [disabled]="cargandoDetalle()" title="Ver detalle" class="p-1.5 text-blue-600 hover:bg-blue-50 rounded
+                                                       transition disabled:opacity-50">
+                                                <lucide-icon [img]="Eye" class="w-4 h-4"></lucide-icon>
                                             </button>
                                             <!-- Cancelar (Sprint 2) — solo si Reservada -->
                                             <button *ngIf="puedeCancelar(s)" (click)="cancelarSolicitud(s)"
@@ -467,3 +466,7 @@
     [producto]="productoSeleccionado()!" [idBodega]="bodegaAgencia()!.id" (cerrar)="cerrarModalSolicitar()"
     (guardado)="onSolicitudGuardada()">
 </app-modal-crear-solicitud>
+
+<app-modal-ver-solicitud *ngIf="mostrarModalVer() && detalleVer()" [detalle]="detalleVer()!"
+    (cerrar)="cerrarModalVer()">
+</app-modal-ver-solicitud>

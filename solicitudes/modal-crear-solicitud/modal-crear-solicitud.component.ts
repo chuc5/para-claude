@@ -1,6 +1,7 @@
-// ============================================================================
-// MODAL — CREAR SOLICITUD (Sprint 2)
-// ============================================================================
+// modal-crear-solicitud.component.ts — REEMPLAZAR COMPLETO
+// FIX PRINCIPAL: unidadActiva ahora es computed sobre signal (idUnidadSeleccionada)
+// en lugar de leer form.value directamente — esto resuelve que el campo cantidad
+// no se habilitaba en productos normales y de expiración.
 
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
@@ -9,36 +10,23 @@ import {
     OnInit, inject, signal, computed, DestroyRef,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-
-// Lucide Icons
 import {
     LucideAngularModule,
-    X, ShoppingCart, AlertCircle, Package,
+    X, ShoppingCart, AlertCircle, Package, Calendar, Tag,
 } from 'lucide-angular';
-
-// ng-select
 import { NgSelectModule } from '@ng-select/ng-select';
-
-// Animaciones (mismo par que el resto de modales del proyecto)
 import { overlayAnimation, modalAnimation } from '../../../animations/modal.animations';
 
 import {
-    ProductoDisponible,
-    UnidadConStock,
-    TipoProductoId,
-    FormatSolicitudes,
+    ProductoDisponible, UnidadConStock, LoteCorrelativo,
+    TipoProductoId, FormatSolicitudes, RespuestaUnidades,
 } from '../models/solicitudes.models';
 import { SolicitudesService } from '../services/solicitudes.service';
 
 @Component({
     selector: 'app-modal-crear-solicitud',
     standalone: true,
-    imports: [
-        CommonModule,
-        ReactiveFormsModule,
-        LucideAngularModule,
-        NgSelectModule,
-    ],
+    imports: [CommonModule, ReactiveFormsModule, LucideAngularModule, NgSelectModule],
     templateUrl: './modal-crear-solicitud.component.html',
     animations: [overlayAnimation, modalAnimation],
 })
@@ -48,62 +36,86 @@ export class ModalCrearSolicitudComponent implements OnInit {
     private readonly service = inject(SolicitudesService);
     private readonly destroyRef = inject(DestroyRef);
 
-    // ========================================================================
-    // INPUTS / OUTPUTS
-    // ========================================================================
-
-    /** Producto sobre el que se crea la solicitud */
     @Input() producto!: ProductoDisponible;
-
-    /** Bodega donde se hace la solicitud */
     @Input() idBodega!: number;
-
     @Output() cerrar = new EventEmitter<void>();
     @Output() guardado = new EventEmitter<void>();
 
-    // ========================================================================
-    // ICONOS
-    // ========================================================================
-    readonly X = X;
-    readonly ShoppingCart = ShoppingCart;
-    readonly AlertCircle = AlertCircle;
-    readonly Package = Package;
+    // ── Iconos ────────────────────────────────────────────────────────────────
+    readonly X = X; readonly ShoppingCart = ShoppingCart;
+    readonly AlertCircle = AlertCircle; readonly Package = Package;
+    readonly Calendar = Calendar; readonly Tag = Tag;
+    readonly TipoProductoId = TipoProductoId;
 
-    // ========================================================================
-    // ESTADO LOCAL
-    // ========================================================================
-
+    // ── Estado ────────────────────────────────────────────────────────────────
     readonly guardando = signal<boolean>(false);
     readonly error = signal<string | null>(null);
-    readonly unidades = signal<UnidadConStock[]>([]);
     readonly cargandoUnidades = signal<boolean>(false);
-    readonly unidadActiva = signal<UnidadConStock | null>(null);
+
+    readonly tipoProducto = signal<TipoProductoId>(TipoProductoId.NORMAL);
+    readonly unidades = signal<UnidadConStock[]>([]);
+    readonly lotesCorrelativo = signal<LoteCorrelativo[]>([]);
+    readonly totalDisponibleCorr = signal<number>(0);
+
+    // ── SEÑAL CLAVE: resuelve el bug donde computed no se actualizaba ─────────
+    // El error: leer this.form.get('id_unidad')?.value dentro de computed()
+    // NO reactivo porque el form control no es un signal. La solución es
+    // mantener una señal separada que se actualiza en el valueChanges callback.
+    readonly idUnidadSeleccionada = signal<number | null>(null);
 
     form!: FormGroup;
 
-    // ========================================================================
-    // COMPUTED
-    // ========================================================================
+    // ── Computed (todos dependen de signals, nunca de form.value directo) ─────
 
-    /** Disponibilidad de la unidad seleccionada */
-    readonly disponible = computed(() =>
-        FormatSolicitudes.cantidad(this.unidadActiva()?.cantidad_disponible)
+    readonly unidadActiva = computed<UnidadConStock | null>(() => {
+        const id = this.idUnidadSeleccionada(); // signal ✓
+        return id ? (this.unidades().find(u => u.id_unidad === id) ?? null) : null;
+    });
+
+    readonly esTalla = computed<boolean>(() =>
+        this.unidades().some(u => (u as any).es_talla === true || (u as any).es_talla === 1)
     );
 
-    /** Clase CSS del indicador de disponibilidad */
-    readonly claseDisponible = computed(() =>
+    readonly maxCantidad = computed<number>(() => {
+        if (this.tipoProducto() === TipoProductoId.CORRELATIVO) {
+            return this.totalDisponibleCorr();
+        }
+        return FormatSolicitudes.cantidad(this.unidadActiva()?.cantidad_disponible);
+    });
+
+    readonly disponible = computed<number>(() => this.maxCantidad());
+    readonly claseDisponible = computed<string>(() =>
         FormatSolicitudes.claseDisponibilidad(this.disponible())
     );
-
-    /** true para mostrar la nota de correlativos */
-    readonly esCorrelativo = computed(() =>
-        this.producto?.id_tipo === TipoProductoId.CORRELATIVO
+    readonly esCorrelativo = computed<boolean>(() =>
+        this.tipoProducto() === TipoProductoId.CORRELATIVO
     );
-
-    /** Clase CSS del badge de tipo de producto */
-    readonly claseTipo = computed(() =>
+    readonly esExpiracion = computed<boolean>(() =>
+        this.tipoProducto() === TipoProductoId.EXPIRACION
+    );
+    readonly claseTipo = computed<string>(() =>
         FormatSolicitudes.claseTipoProducto(this.producto?.id_tipo)
     );
+
+    // ── Getters ───────────────────────────────────────────────────────────────
+
+    get proximoCorrelativo(): number {
+        const lote = this.lotesCorrelativo()[0];
+        if (!lote) return 0;
+        return lote.correlativo_inicial + lote.ya_asignados;
+    }
+
+    get labelUnidad(): string {
+        return this.esTalla() ? 'Talla' : 'Unidad de medida';
+    }
+
+    get placeholderUnidad(): string {
+        return this.esTalla() ? 'Seleccionar talla...' : 'Seleccionar unidad...';
+    }
+
+    get textoBoton(): string {
+        return this.guardando() ? 'Confirmando...' : 'Confirmar solicitud';
+    }
 
     // ========================================================================
     // LIFECYCLE
@@ -113,21 +125,21 @@ export class ModalCrearSolicitudComponent implements OnInit {
         this._inicializarFormulario();
         this._cargarUnidades();
 
-        // Reaccionar al cambio de unidad para actualizar validadores y estado
+        // Suscribir al valueChanges del form y actualizar la señal
         this.form.get('id_unidad')!.valueChanges
             .pipe(takeUntilDestroyed(this.destroyRef))
             .subscribe((id: number | null) => this._onUnidadChange(id));
     }
 
     // ========================================================================
-    // INICIALIZACIÓN
+    // PRIVADOS
     // ========================================================================
 
     private _inicializarFormulario(): void {
         this.form = this.fb.group({
             id_unidad: [null, [Validators.required]],
-            // Deshabilitado hasta que el usuario seleccione una unidad con stock
-            cantidad: [{ value: null, disabled: true }, [Validators.required, Validators.min(0.01)]],
+            cantidad: [{ value: null, disabled: true },
+            [Validators.required, Validators.min(1)]],
             observaciones: ['', [Validators.maxLength(500)]],
         });
     }
@@ -137,83 +149,89 @@ export class ModalCrearSolicitudComponent implements OnInit {
 
         this.service.obtenerUnidadesProducto(this.producto.id, this.idBodega)
             .pipe(takeUntilDestroyed(this.destroyRef))
-            .subscribe(unidades => {
-                this.unidades.set(unidades);
+            .subscribe((resp: RespuestaUnidades) => {
+                this.tipoProducto.set(resp.tipo);
+                this.unidades.set(resp.unidades ?? []);
                 this.cargandoUnidades.set(false);
 
-                // Auto-seleccionar la unidad por defecto
-                const def = unidades.find(u => u.es_default) ?? unidades[0] ?? null;
-                if (def) {
-                    this.form.patchValue({ id_unidad: def.id_unidad });
-                    // El valueChanges de arriba se dispara y actualiza unidadActiva
+                if (resp.tipo === TipoProductoId.CORRELATIVO) {
+                    this.lotesCorrelativo.set(resp.lotes_correlativo ?? []);
+                    this.totalDisponibleCorr.set(resp.cantidad_disponible ?? 0);
+                    // Auto-seleccionar la única unidad (siempre UND para correlativos)
+                    const und = resp.unidades[0] ?? null;
+                    if (und) {
+                        this.idUnidadSeleccionada.set(und.id_unidad);
+                        this.form.patchValue({ id_unidad: und.id_unidad });
+                        // Habilitar cantidad si hay disponibles
+                        if (this.totalDisponibleCorr() > 0) {
+                            this._habilitarCantidad(this.totalDisponibleCorr());
+                        }
+                    }
+                } else {
+                    // Normal o Expiración: seleccionar unidad default
+                    const def = this.unidades().find(u => u.es_default)
+                        ?? this.unidades()[0]
+                        ?? null;
+                    if (def) {
+                        this.form.patchValue({ id_unidad: def.id_unidad });
+                        // valueChanges dispara _onUnidadChange automáticamente
+                    }
                 }
             });
     }
 
-    // ========================================================================
-    // CAMBIO DE UNIDAD
-    // ========================================================================
-
     private _onUnidadChange(idUnidad: number | null): void {
-        const u = idUnidad
-            ? (this.unidades().find(x => x.id_unidad === idUnidad) ?? null)
-            : null;
-        this.unidadActiva.set(u);
+        // 1. Actualizar señal PRIMERO — los computed se recalculan al leer
+        this.idUnidadSeleccionada.set(idUnidad);
 
-        const disponible = FormatSolicitudes.cantidad(u?.cantidad_disponible);
-        const ctrl = this.form.get('cantidad')!;
+        // 2. Ahora maxCantidad() refleja la unidad recién seleccionada
+        const max = this.maxCantidad();
 
-        ctrl.setValidators([
-            Validators.required,
-            Validators.min(0.01),
-            Validators.max(disponible),
-        ]);
-
-        // ← Aquí el cambio clave: API del control, no [disabled] en el template
-        if (!u || disponible === 0) {
-            ctrl.disable({ emitEvent: false });
+        if (max > 0) {
+            this._habilitarCantidad(max);
         } else {
-            ctrl.enable({ emitEvent: false });
+            this.form.get('cantidad')!.disable({ emitEvent: false });
+            this.form.get('cantidad')!.setValue(null, { emitEvent: false });
         }
+    }
 
+    private _habilitarCantidad(max: number): void {
+        const ctrl = this.form.get('cantidad')!;
+        ctrl.setValidators([Validators.required, Validators.min(1), Validators.max(max)]);
+        ctrl.enable({ emitEvent: false });
         ctrl.updateValueAndValidity({ emitEvent: false });
 
-        const cantActual = ctrl.value as number | null;
-        if (cantActual !== null && cantActual > disponible) {
+        const actual = ctrl.value as number | null;
+        if (actual !== null && actual > max) {
             ctrl.setValue(null, { emitEvent: false });
         }
     }
 
     // ========================================================================
-    // ENVIAR
+    // ACCIONES
     // ========================================================================
 
     confirmar(): void {
-        if (this.form.invalid) {
+        if (this.form.invalid || this.maxCantidad() === 0) {
             this.form.markAllAsTouched();
             return;
         }
 
         this.guardando.set(true);
         this.error.set(null);
-
-        // getRawValue() incluye controles deshabilitados — form.value los omite
         const raw = this.form.getRawValue();
 
         this.service.crearSolicitud({
             id_bodega: this.idBodega,
             id_producto: this.producto.id,
             id_unidad: Number(raw.id_unidad),
-            cantidad: parseFloat(raw.cantidad),
+            cantidad: parseInt(String(raw.cantidad), 10),
             observaciones: raw.observaciones?.trim() || undefined,
-        })
-            .pipe(takeUntilDestroyed(this.destroyRef))
+        }).pipe(takeUntilDestroyed(this.destroyRef))
             .subscribe({
-                next: idSolicitud => {
+                next: id => {
                     this.guardando.set(false);
-                    if (idSolicitud !== null) {
-                        this.guardado.emit();
-                    }
+                    if (id !== null) this.guardado.emit();
                 },
                 error: () => {
                     this.error.set('Error al confirmar la solicitud. Intenta de nuevo.');
@@ -222,12 +240,10 @@ export class ModalCrearSolicitudComponent implements OnInit {
             });
     }
 
-    cerrarModal(): void {
-        if (!this.guardando()) this.cerrar.emit();
-    }
+    cerrarModal(): void { if (!this.guardando()) this.cerrar.emit(); }
 
     // ========================================================================
-    // HELPERS DE VALIDACIÓN (mismo patrón que modal-presupuesto-general)
+    // HELPERS DE VALIDACIÓN
     // ========================================================================
 
     esInvalido(campo: string): boolean {
@@ -239,17 +255,15 @@ export class ModalCrearSolicitudComponent implements OnInit {
         const c = this.form.get(campo);
         if (!c) return '';
         if (c.hasError('required')) return 'Este campo es requerido';
-        if (c.hasError('min')) return `El valor mínimo es ${c.getError('min').min}`;
-        if (c.hasError('max')) return `La cantidad máxima disponible es ${c.getError('max').max}`;
+        if (c.hasError('min')) return 'El mínimo es 1';
+        if (c.hasError('max')) return `Máximo disponible: ${c.getError('max').max}`;
         if (c.hasError('maxlength')) return `Máximo ${c.getError('maxlength').requiredLength} caracteres`;
         return '';
     }
 
-    // ========================================================================
-    // GETTERS DEL TEMPLATE
-    // ========================================================================
-
-    get textoBoton(): string {
-        return this.guardando() ? 'Confirmando...' : 'Confirmar solicitud';
+    fmtFecha(f: string | null | undefined): string {
+        if (!f) return '';
+        const [y, m, d] = f.split('-');
+        return `${d}/${m}/${y}`;
     }
 }

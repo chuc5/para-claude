@@ -39,8 +39,21 @@ export interface ApiResponseInfo extends ApiResponseBase {
     excepcion?: ApiExcepcion;
 }
 
+export interface LoteCorrelativo {
+    id: number;
+    serie: string | null;
+    correlativo_inicial: number;
+    correlativo_final: number;
+    cantidad_disponible: number;
+    ya_asignados: number;
+}
+
 export interface RespuestaUnidades {
+    tipo: TipoProductoId;
     unidades: UnidadConStock[];
+    // solo para tipo 1:
+    lotes_correlativo?: LoteCorrelativo[];
+    cantidad_disponible?: number;
 }
 
 export type ApiResponse<T = unknown> =
@@ -221,10 +234,12 @@ export interface UnidadConStock {
     id_unidad: number;
     nombre: string;
     abreviatura: string;
+    es_talla: boolean;           // ← NUEVO (viene del PHP ahora)
     es_default: boolean;
     cantidad_total: number;
     cantidad_reservada: number;
-    cantidad_disponible:  number;
+    cantidad_disponible: number;
+    fecha_expiracion_proxima?: string | null;
 }
 
 

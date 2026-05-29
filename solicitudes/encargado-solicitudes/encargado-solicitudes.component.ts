@@ -32,6 +32,7 @@ import {
 } from '../services/encargado-solicitudes.service';
 import { ModalEntregarComponent } from '../modal-entregar/modal-entregar.component';
 import { ModalRechazarComponent } from '../modal-rechazar/modal-rechazar.component';
+import { ModalVerSolicitudComponent } from '../modal-ver-solicitud/modal-ver-solicitud.component';
 
 const SWAL = {
     confirmColor: '#6366f1',
@@ -49,6 +50,7 @@ const SWAL = {
         LucideAngularModule,
         ModalEntregarComponent,
         ModalRechazarComponent,
+        ModalVerSolicitudComponent,
     ],
     templateUrl: './encargado-solicitudes.component.html',
 })
@@ -90,6 +92,8 @@ export class EncargadoSolicitudesComponent implements OnInit {
     readonly mostrarModalRechazar = signal<boolean>(false);
     readonly detalleActivo = signal<DetalleSolicitud | null>(null);
     readonly cargandoDetalle = signal<boolean>(false);
+
+    readonly mostrarModalVer = signal<boolean>(false);
 
     // ── Computed ─────────────────────────────────────────────────────────────
     readonly paginas = computed<number[]>(() => {
@@ -195,15 +199,20 @@ export class EncargadoSolicitudesComponent implements OnInit {
                 this.cargandoDetalle.set(false);
                 if (detalle) {
                     this.detalleActivo.set(detalle);
-                    // Abre el modal de detalle/entrega según estado
+                    // Reservada → modal de entrega; el resto → solo ver
                     if (solicitud.id_estado === EstadoSolicitudId.RESERVADA) {
                         this.mostrarModalEntregar.set(true);
                     } else {
-                        // Para solicitudes ya gestionadas: solo mostrar modal entregar en modo lectura
-                        this.mostrarModalEntregar.set(true);
+                        this.mostrarModalVer.set(true);
                     }
                 }
             });
+    }
+
+    // 5. Agregar método:
+    cerrarModalVer(): void {
+        this.mostrarModalVer.set(false);
+        this.detalleActivo.set(null);
     }
 
     // ========================================================================

@@ -152,9 +152,14 @@
                                 </td>
 
                                 <td class="px-4 py-3">
-                                    <span class="text-sm font-medium text-gray-900 font-mono">
-                                        {{ s.solicitante }}
-                                    </span>
+                                    <div>
+                                        <span class="text-sm font-medium text-gray-900">
+                                            {{ s.nombre_solicitante || s.solicitante }}
+                                        </span>
+                                        <span class="text-xs text-gray-400 font-mono block leading-tight mt-0.5">
+                                            {{ s.solicitante }}
+                                        </span>
+                                    </div>
                                 </td>
 
                                 <td class="px-4 py-3">
@@ -258,3 +263,7 @@
 <app-modal-rechazar *ngIf="mostrarModalRechazar() && detalleActivo()" [detalle]="detalleActivo()!"
     (cerrar)="cerrarModalRechazar()" (confirmar)="onConfirmarRechazo($event)">
 </app-modal-rechazar>
+
+<app-modal-ver-solicitud *ngIf="mostrarModalVer() && detalleActivo()" [detalle]="detalleActivo()!"
+    (cerrar)="cerrarModalVer()">
+</app-modal-ver-solicitud>

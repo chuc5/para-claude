@@ -25,8 +25,10 @@ import {
     esInfo,
     MENSAJES_SOLICITUDES,
     UnidadConStock,
-    RespuestaUnidades
+    RespuestaUnidades,
+    TipoProductoId
 } from '../models/solicitudes.models';
+import { DetalleSolicitud } from '../services/encargado-solicitudes.service';
 
 // ── Tipos internos de respuesta del backend ──────────────────────────────────
 
@@ -302,22 +304,20 @@ export class SolicitudesService {
     obtenerUnidadesProducto(
         idProducto: number,
         idBodega: number,
-    ): Observable<UnidadConStock[]> {
+    ): Observable<RespuestaUnidades> {
         return this.api.query({
             ruta: `inventario/obtenerUnidadesProducto?id_producto=${idProducto}&id_bodega=${idBodega}`,
             tipo: 'get',
         }).pipe(
             map((res: ApiResponse<RespuestaUnidades>) => {
-                if (esExitosa(res)) return res.datos?.unidades ?? [];
-                if (esInfo(res)) return [];
+                if (esExitosa(res) && res.datos) return res.datos;
+                if (esInfo(res)) return { tipo: TipoProductoId.NORMAL, unidades: [] };
                 throw new Error(res.mensaje);
             }),
             catchError(error => {
-                const msg = error instanceof Error
-                    ? error.message
-                    : MENSAJES_SOLICITUDES.ERROR.UNIDADES;
+                const msg = error instanceof Error ? error.message : MENSAJES_SOLICITUDES.ERROR.UNIDADES;
                 console.error('[SolicitudesService] obtenerUnidadesProducto:', msg);
-                return of([] as UnidadConStock[]);
+                return of({ tipo: TipoProductoId.NORMAL, unidades: [] } as RespuestaUnidades);
             }),
         );
     }
@@ -398,6 +398,23 @@ export class SolicitudesService {
             }),
             catchError(this._manejarError(MENSAJES_SOLICITUDES.ERROR.CANCELAR)),
             finalize(() => this._cargando$.next(false)),
+        );
+    }
+
+    obtenerDetalleSolicitud(idSolicitud: number): Observable<DetalleSolicitud | null> {
+        return this.api.query({
+            ruta: `inventario/obtenerDetalleSolicitud?id=${idSolicitud}`,
+            tipo: 'get',
+        }).pipe(
+            map((res: ApiResponse<DetalleSolicitud>) => {
+                if (esExitosa(res) && res.datos) return res.datos;
+                throw new Error(res.mensaje);
+            }),
+            catchError(error => {
+                const msg = error instanceof Error ? error.message : 'Error al cargar el detalle';
+                this.api.mensajeServidorGooey('error', msg);
+                return of(null);
+            }),
         );
     }
 

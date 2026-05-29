@@ -38,6 +38,9 @@ import {
 } from '../services/solicitudes.service';
 import { ModalCrearSolicitudComponent } from '../modal-crear-solicitud/modal-crear-solicitud.component';
 
+import { ModalVerSolicitudComponent } from '../modal-ver-solicitud/modal-ver-solicitud.component';
+import { DetalleSolicitud } from '../services/encargado-solicitudes.service';
+
 // ── Configuración centralizada de SweetAlert (igual que presupuesto-general) ─
 const SWAL = {
     confirmColor: '#6366f1',
@@ -57,6 +60,7 @@ type TabActiva = 'catalogo' | 'solicitudes';
         FormsModule,
         LucideAngularModule,
         ModalCrearSolicitudComponent,  // ← Sprint 2
+        ModalVerSolicitudComponent,
     ],
     templateUrl: './solicitudes-agencia.component.html',
     styleUrls: ['./solicitudes-agencia.component.css'],
@@ -100,6 +104,10 @@ export class SolicitudesAgenciaComponent implements OnInit {
     readonly filtroEstado = signal<number | null>(null);
     readonly paginaSolicitudes = signal<number>(1);
     readonly bodegaCargada = signal<boolean>(false);
+
+    readonly mostrarModalVer = signal<boolean>(false);
+    readonly detalleVer = signal<DetalleSolicitud | null>(null);
+    readonly cargandoDetalle = signal<boolean>(false);
 
     // ── Modal crear solicitud (Sprint 2) ─────────────────────────────────────
     readonly mostrarModalSolicitar = signal<boolean>(false);
@@ -295,10 +303,23 @@ export class SolicitudesAgenciaComponent implements OnInit {
     // ========================================================================
 
     verDetalle(solicitud: Solicitud): void {
-        // TODO Sprint 5 — ModalDetalleSolicitudComponent
-        console.log('Ver detalle solicitud:', solicitud.id);
+        this.cargandoDetalle.set(true);
+        this.service.obtenerDetalleSolicitud(solicitud.id)
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe(detalle => {
+                this.cargandoDetalle.set(false);
+                if (detalle) {
+                    this.detalleVer.set(detalle);
+                    this.mostrarModalVer.set(true);
+                }
+            });
     }
 
+    // 5. Agregar método:
+    cerrarModalVer(): void {
+        this.mostrarModalVer.set(false);
+        this.detalleVer.set(null);
+    }
     // ========================================================================
     // HELPERS DEL TEMPLATE
     // ========================================================================

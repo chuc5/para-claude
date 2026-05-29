@@ -35,7 +35,8 @@ export interface BodegaEncargado {
 
 export interface SolicitudEncargado {
     id: number;
-    solicitante: string;
+    solicitante: string;          // idUsuario raw
+    nombre_solicitante: string;   // ← NUEVO: de datospersonales.nombres
     id_bodega: number;
     id_estado: number;
     estado: string;
